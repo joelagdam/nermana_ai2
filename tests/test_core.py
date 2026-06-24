@@ -84,6 +84,24 @@ class MemoryTests(unittest.TestCase):
             self.assertTrue(any(hit.id == memory_id for hit in hits))
             self.assertTrue(store.forget(memory_id))
 
+    def test_relative_memory_path_uses_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            other = Path(tmp) / "other"
+            root.mkdir()
+            other.mkdir()
+            previous = Path.cwd()
+            try:
+                os.chdir(other)
+                with patch("nermana.config.PROJECT_ROOT", root):
+                    store = MemoryStore(MemoryConfig(db_path="data/test.sqlite3"))
+                    self.assertEqual(store.path, root / "data" / "test.sqlite3")
+                    store.remember("relative path works", tags="test")
+                    self.assertTrue(store.path.exists())
+                    self.assertFalse((other / "data" / "test.sqlite3").exists())
+            finally:
+                os.chdir(previous)
+
 
 class SafetyTests(unittest.TestCase):
     def test_gate_blocks_dangerous_and_allows_power(self) -> None:

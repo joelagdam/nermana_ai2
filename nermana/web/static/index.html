@@ -58,6 +58,7 @@
             <button id="detectLlama">Use Detected llama-server</button>
           </div>
           <div id="llamaStatus" class="setup-panel"></div>
+          <div id="presetsList" class="list preset-list"></div>
           <div id="modelsList" class="list"></div>
           <form id="modelDownload" class="grid-form">
             <label>Preset
@@ -223,8 +224,10 @@
 
         <section id="settings" class="page">
           <div class="toolbar">
-            <button id="updateButton">Update Nermana</button>
+            <button id="checkUpdateButton">Check Updates</button>
+            <button id="updateButton" class="primary-action">Pull Latest Push</button>
           </div>
+          <div id="updateStatus" class="setup-panel"></div>
           <form id="settingsForm" class="stack-form">
             <textarea id="settingsJson" spellcheck="false"></textarea>
             <button class="primary-action">Save JSON</button>

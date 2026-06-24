@@ -436,6 +436,10 @@ input[type="checkbox"]:checked::before {
   gap: 9px;
 }
 
+.preset-list {
+  margin-bottom: 12px;
+}
+
 .row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

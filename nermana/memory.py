@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .config import MemoryConfig
+from .config import MemoryConfig, resolve_path
 
 
 @dataclass
@@ -21,7 +21,7 @@ class MemoryHit:
 
 class MemoryStore:
     def __init__(self, config: MemoryConfig):
-        self.path = Path(config.db_path).expanduser()
+        self.path = resolve_path(config.db_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.config = config
         self._init_db()

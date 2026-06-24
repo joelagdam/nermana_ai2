@@ -9,6 +9,65 @@ from typing import Any
 from .config import DATA_DIR, DEFAULT_CONFIG_PATH, MODELS_DIR, PROJECT_ROOT
 
 
+def update_status(fetch: bool = False) -> dict[str, Any]:
+    if not (PROJECT_ROOT / ".git").exists():
+        return {"ok": False, "error": "This folder is not a git checkout."}
+    current = _git(["rev-parse", "--short", "HEAD"])
+    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+    upstream = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    if not current["ok"]:
+        return current
+    if not upstream["ok"]:
+        return {
+            "ok": True,
+            "message": "No upstream branch is configured.",
+            "current": current.get("stdout", ""),
+            "branch": branch.get("stdout", ""),
+            "update_available": False,
+            "fetch": None,
+        }
+
+    fetch_result = None
+    if fetch:
+        fetch_result = _git(["fetch", "--all", "--prune"])
+        if not fetch_result["ok"]:
+            return _status_result(False, "Could not check remote updates.", current, branch, upstream, fetch_result)
+
+    remote = _git(["rev-parse", "--short", "@{u}"])
+    current_full = _git(["rev-parse", "HEAD"])
+    remote_full = _git(["rev-parse", "@{u}"])
+    base = _git(["merge-base", "HEAD", "@{u}"])
+    if not (remote["ok"] and current_full["ok"] and remote_full["ok"] and base["ok"]):
+        return _status_result(False, "Could not compare local and upstream commits.", current, branch, upstream, fetch_result)
+
+    local_sha = current_full.get("stdout", "")
+    remote_sha = remote_full.get("stdout", "")
+    base_sha = base.get("stdout", "")
+    behind = local_sha != remote_sha and base_sha == local_sha
+    ahead = local_sha != remote_sha and base_sha == remote_sha
+    diverged = local_sha != remote_sha and not behind and not ahead
+    if behind:
+        message = "Update available from upstream."
+    elif ahead:
+        message = "Local checkout is ahead of upstream."
+    elif diverged:
+        message = "Local checkout and upstream have diverged."
+    else:
+        message = "Already up to date."
+    return {
+        "ok": True,
+        "message": message,
+        "current": current.get("stdout", ""),
+        "remote": remote.get("stdout", ""),
+        "branch": branch.get("stdout", ""),
+        "upstream": upstream.get("stdout", ""),
+        "update_available": behind,
+        "ahead": ahead,
+        "diverged": diverged,
+        "fetch": fetch_result,
+    }
+
+
 def update_system() -> dict[str, Any]:
     if not (PROJECT_ROOT / ".git").exists():
         return {"ok": False, "error": "This folder is not a git checkout."}
@@ -24,6 +83,7 @@ def update_system() -> dict[str, Any]:
     _ensure_persistent_dirs()
     after = _git(["rev-parse", "--short", "HEAD"])
     ok = pull["ok"] and after["ok"]
+    status = update_status(fetch=False)
     message = "Updated. Restart Nermana to load new code." if before.get("stdout") != after.get("stdout") else "Already up to date."
     return {
         "ok": ok,
@@ -35,6 +95,7 @@ def update_system() -> dict[str, Any]:
         "config_path": str(DEFAULT_CONFIG_PATH),
         "fetch": fetch,
         "pull": pull,
+        "status": status,
     }
 
 
@@ -82,4 +143,16 @@ def _result(ok: bool, message: str, before: dict, step: dict, backup: Path | Non
         "step": step,
         "config_path": str(DEFAULT_CONFIG_PATH),
         "models_dir": str(MODELS_DIR),
+    }
+
+
+def _status_result(ok: bool, message: str, current: dict, branch: dict, upstream: dict, fetch: dict | None) -> dict[str, Any]:
+    return {
+        "ok": ok,
+        "message": message,
+        "current": current.get("stdout", ""),
+        "branch": branch.get("stdout", ""),
+        "upstream": upstream.get("stdout", ""),
+        "update_available": False,
+        "fetch": fetch,
     }

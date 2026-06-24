@@ -67,7 +67,7 @@ async function runAction(title, task, successMessage = "Done") {
   try {
     const result = await task();
     if (result && result.ok === false) {
-      showToast(title, result.error || "Action failed.", "error");
+      showToast(title, result.error || result.message || "Action failed.", "error");
     } else {
       showToast(title, successMessage, "success");
     }
@@ -105,6 +105,7 @@ async function refreshAll() {
   await renderTools();
   await renderMemory();
   await renderLogs();
+  await renderUpdateStatus(false);
   document.getElementById("settingsJson").value = JSON.stringify(config, null, 2);
 }
 
@@ -302,22 +303,46 @@ async function renderModels() {
 }
 
 async function renderPresets() {
-  const data = await api("/api/models/presets");
   const select = document.querySelector("#modelDownload [name=preset_id]");
+  const list = document.getElementById("presetsList");
   const current = select.value;
   select.innerHTML = "";
+  list.innerHTML = "";
   const custom = document.createElement("option");
   custom.value = "";
   custom.textContent = "Direct link";
   select.appendChild(custom);
-  data.presets.forEach((preset) => {
+  let data = {};
+  try {
+    data = await api("/api/models/presets");
+  } catch (error) {
+    const message = String(error.message || error);
+    list.appendChild(makeRow("Preset models unavailable", message));
+    output("downloadOutput", { ok: false, error: message });
+    return;
+  }
+  const presets = Array.isArray(data.presets) ? data.presets : [];
+  if (!presets.length) {
+    list.appendChild(makeRow("No preset models", "empty preset catalog"));
+  }
+  presets.forEach((preset) => {
     const option = document.createElement("option");
     option.value = preset.id;
     option.textContent = `${preset.name} - ${preset.size_hint}`;
     option.title = preset.notes;
     select.appendChild(option);
+    const download = button("Download", () => downloadModel({ preset_id: preset.id, select: true }), true);
+    list.appendChild(makeRow(preset.name, preset.size_hint, [download], preset.notes));
   });
   select.value = current;
+}
+
+async function downloadModel(payload) {
+  output("downloadOutput", "Download in progress.");
+  const result = await runAction("Model download", () => api("/api/models/download", { method: "POST", body: JSON.stringify(payload) }), "Download complete");
+  output("downloadOutput", result);
+  await refreshAll();
+  return result;
 }
 
 function renderLlamaStatus(status) {
@@ -349,10 +374,7 @@ document.getElementById("modelDownload").addEventListener("submit", async (event
     filename: form.filename.value,
     select: form.select.checked,
   };
-  output("downloadOutput", "Download in progress.");
-  const result = await runAction("Model download", () => api("/api/models/download", { method: "POST", body: JSON.stringify(payload) }), "Download complete");
-  output("downloadOutput", result);
-  await refreshAll();
+  await downloadModel(payload);
 });
 document.getElementById("modelSettings").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -527,6 +549,26 @@ async function renderLogs() {
   output("logsOutput", await api("/api/logs"));
 }
 
+async function renderUpdateStatus(refreshRemote = false) {
+  const suffix = refreshRemote ? "?refresh=1" : "";
+  const result = await api(`/api/update/status${suffix}`);
+  renderUpdateStatusResult(result);
+  return result;
+}
+
+function renderUpdateStatusResult(result) {
+  const node = document.getElementById("updateStatus");
+  if (!result.ok) {
+    node.textContent = result.error || result.message || "Update status unavailable.";
+    return;
+  }
+  const parts = [result.message || "Update status ready."];
+  if (result.branch) parts.push(`branch ${result.branch}`);
+  if (result.current) parts.push(`current ${result.current}`);
+  if (result.remote) parts.push(`upstream ${result.remote}`);
+  node.textContent = parts.join(" | ");
+}
+
 document.getElementById("settingsForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   let patch = {};
@@ -540,8 +582,15 @@ document.getElementById("settingsForm").addEventListener("submit", async (event)
   output("settingsOutput", result);
 });
 
+document.getElementById("checkUpdateButton").addEventListener("click", async () => {
+  const result = await runAction("Update check", () => renderUpdateStatus(true), "Check complete");
+  renderUpdateStatusResult(result);
+  output("updateOutput", result);
+});
+
 document.getElementById("updateButton").addEventListener("click", async () => {
   const result = await runAction("Update", () => api("/api/update", { method: "POST", body: JSON.stringify({}) }), "Update finished");
+  renderUpdateStatusResult(result.status || result);
   output("updateOutput", result);
 });
 
