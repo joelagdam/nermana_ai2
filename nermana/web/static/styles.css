@@ -187,6 +187,15 @@ label {
   margin-bottom: 12px;
 }
 
+.setup-panel {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 10px;
+  margin-bottom: 12px;
+  color: var(--muted);
+}
+
 .list,
 .table {
   display: grid;

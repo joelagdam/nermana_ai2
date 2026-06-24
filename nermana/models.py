@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,46 @@ class ModelManager:
         candidate = self.models_dir / self.config.model.active_model
         return candidate if candidate.exists() else None
 
+    def llama_server_status(self) -> dict[str, Any]:
+        configured = self.config.model.llama_server_path or "auto"
+        resolved = self.resolve_llama_server()
+        return {
+            "configured": configured,
+            "resolved": resolved,
+            "available": resolved is not None,
+            "candidates": [str(path) for path in self.llama_server_candidates()],
+        }
+
+    def resolve_llama_server(self) -> str | None:
+        configured = (self.config.model.llama_server_path or "auto").strip()
+        if configured not in {"", "auto"}:
+            if "/" in configured or "\\" in configured or configured.startswith("~"):
+                path = Path(configured).expanduser()
+                if path.exists():
+                    return str(path)
+                resolved = resolve_path(configured)
+                if resolved.exists():
+                    return str(resolved)
+                return None
+            found = shutil.which(configured)
+            if found:
+                return found
+        found = shutil.which("llama-server")
+        if found:
+            return found
+        for candidate in self.llama_server_candidates():
+            if candidate.exists():
+                return str(candidate)
+        return None
+
+    def llama_server_candidates(self) -> list[Path]:
+        home = Path.home()
+        return [
+            home / "llama.cpp" / "build" / "bin" / "llama-server",
+            home / "llama.cpp" / "llama-server",
+            home / "llama.cpp" / "server",
+        ]
+
     def switch(self, model_name: str) -> dict[str, Any]:
         match = next((model for model in self.scan() if model.name == model_name), None)
         if match is None:
@@ -97,10 +138,17 @@ class ModelManager:
         model = self.active_path()
         if model is None:
             return {"ok": False, "error": "Select a .gguf model first."}
+        llama_server = self.resolve_llama_server()
+        if llama_server is None:
+            return {
+                "ok": False,
+                "error": "llama-server was not found. Set the path in Models, for example ~/llama.cpp/build/bin/llama-server.",
+                "llama_server": self.llama_server_status(),
+            }
         self.stop_server()
         port = self._port_from_base_url()
         command = [
-            self.config.model.llama_server_path,
+            llama_server,
             "-m",
             str(model),
             "-c",

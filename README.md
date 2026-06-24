@@ -42,6 +42,20 @@ Build or install `llama.cpp`, place `.gguf` models in `models/`, then start the 
 sh scripts/termux_llama_server.sh
 ```
 
+If your `llama.cpp` build is in the Termux home folder, Nermana checks these automatically:
+
+```sh
+~/llama.cpp/build/bin/llama-server
+~/llama.cpp/llama-server
+~/llama.cpp/server
+```
+
+You can also set it in the Models page, or start manually with:
+
+```sh
+NERMANA_LLAMA_SERVER=$HOME/llama.cpp/build/bin/llama-server sh scripts/termux_llama_server.sh
+```
+
 If your Termux repository provides `llama.cpp` and you want the setup script to try installing it only when `llama-server` is missing, run:
 
 ```sh
@@ -55,6 +69,19 @@ sh scripts/termux_start.sh
 ```
 
 Open `http://127.0.0.1:8765` on the phone.
+
+## Web Setup
+
+The Models page is the setup hub:
+
+- Detect and save your existing `llama-server` path from `~/llama.cpp`.
+- Download model presets into `models/`.
+- Download any direct `.gguf` link into `models/`.
+- Select the downloaded model.
+- Edit context size, threads, temperature, top-p, thinking mode, and model server URL.
+- Restart the local `llama-server` after a model is selected.
+
+Preset downloads require internet on the phone. If the phone is offline, put `.gguf` files in `models/` manually and press Scan Models.
 
 ## Phone Control
 
@@ -75,7 +102,7 @@ python -m nermana telegram --once
 
 ## Local Model
 
-The default path expects a `llama.cpp` server compatible with `/v1/chat/completions`. The Models page scans the Termux project `models/` folder, selects a `.gguf`, edits runtime settings, and can attempt to restart `llama-server`.
+The default path expects a `llama.cpp` server compatible with `/v1/chat/completions`. The Models page scans the Termux project `models/` folder, selects a `.gguf`, downloads presets or direct links, edits runtime settings, and can attempt to restart `llama-server`.
 
 If you use Qwen3 GGUF, `/no_think` is used for fast general replies and `/think` is used automatically for harder prompts.
 

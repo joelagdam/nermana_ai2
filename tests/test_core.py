@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from nermana.agent import AgentCore
 from nermana.config import AppConfig, FileConfig, MemoryConfig, ModelConfig, SafetyConfig, SearchConfig, merge_config, save_config
+from nermana.model_downloads import download_model, list_presets
 from nermana.memory import MemoryStore
 from nermana.models import ModelManager
 from nermana.safety import DecisionGate
@@ -39,6 +41,25 @@ class ModelTests(unittest.TestCase):
             self.assertTrue(manager.switch("tiny.gguf")["ok"])
             self.assertEqual(cfg.model.active_model, "tiny.gguf")
             self.assertFalse(manager.switch("typo.guff")["ok"])
+
+    def test_detects_llama_server_in_home_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            binary = home / "llama.cpp" / "build" / "bin" / "llama-server"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            cfg = AppConfig(model=ModelConfig(llama_server_path="auto"))
+            manager = ModelManager(cfg, persist=False)
+            with patch("pathlib.Path.home", return_value=home), patch("shutil.which", return_value=None):
+                self.assertEqual(manager.resolve_llama_server(), str(binary))
+                self.assertTrue(manager.llama_server_status()["available"])
+
+    def test_model_download_rejects_non_gguf_and_non_http(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(model=ModelConfig(models_dir=str(Path(tmp) / "models")))
+            self.assertFalse(download_model(cfg, "file:///tmp/model.gguf")["ok"])
+            self.assertFalse(download_model(cfg, "https://example.com/model.bin")["ok"])
+            self.assertTrue(any(preset["id"] == "qwen25_15b_instruct_q4" for preset in list_presets()))
 
 
 class MemoryTests(unittest.TestCase):

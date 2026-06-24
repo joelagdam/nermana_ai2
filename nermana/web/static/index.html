@@ -45,11 +45,23 @@
           <div class="toolbar">
             <button id="scanModels">Scan Models</button>
             <button id="restartModel">Restart Server</button>
+            <button id="detectLlama">Use Detected llama-server</button>
           </div>
+          <div id="llamaStatus" class="setup-panel"></div>
           <div id="modelsList" class="list"></div>
+          <form id="modelDownload" class="grid-form">
+            <label>Preset
+              <select name="preset_id"></select>
+            </label>
+            <label>Direct GGUF link <input name="url" placeholder="https://...model.gguf" /></label>
+            <label>Save as <input name="filename" placeholder="optional-name.gguf" /></label>
+            <label>Select after download <input name="select" type="checkbox" checked /></label>
+            <button>Download Model</button>
+          </form>
           <form id="modelSettings" class="grid-form">
+            <label>Models folder <input name="models_dir" placeholder="models" /></label>
             <label>Base URL <input name="base_url" /></label>
-            <label>llama-server <input name="llama_server_path" /></label>
+            <label>llama-server <input name="llama_server_path" placeholder="auto or ~/llama.cpp/build/bin/llama-server" /></label>
             <label>Context <input name="context_size" type="number" min="512" step="512" /></label>
             <label>Threads <input name="threads" type="number" min="1" /></label>
             <label>Temperature <input name="temperature" type="number" step="0.05" min="0" max="2" /></label>
@@ -67,6 +79,7 @@
             <input name="message" placeholder="Model test prompt" />
             <button>Test</button>
           </form>
+          <pre id="downloadOutput"></pre>
           <pre id="modelOutput"></pre>
         </section>
 

@@ -11,6 +11,13 @@ has_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+has_llama_server() {
+  has_cmd llama-server ||
+    [ -x "$HOME/llama.cpp/build/bin/llama-server" ] ||
+    [ -x "$HOME/llama.cpp/llama-server" ] ||
+    [ -x "$HOME/llama.cpp/server" ]
+}
+
 ensure_pkg() {
   pkg_name="$1"
   check_cmd="${2:-}"
@@ -44,7 +51,7 @@ needs_pkg() {
 }
 
 ensure_llama() {
-  if has_cmd llama-server; then
+  if has_llama_server; then
     echo "skip: llama.cpp (llama-server already exists)"
     return 0
   fi
@@ -66,7 +73,7 @@ for item in "python:python" "git:git" "clang:clang" "cmake:cmake" "make:make" "l
     needs_install=1
   fi
 done
-if [ "${NERMANA_INSTALL_LLAMA:-0}" = "1" ] && ! has_cmd llama-server && ! has_pkg llama.cpp; then
+if [ "${NERMANA_INSTALL_LLAMA:-0}" = "1" ] && ! has_llama_server && ! has_pkg llama.cpp; then
   needs_install=1
 fi
 if [ "$needs_install" = "1" ]; then

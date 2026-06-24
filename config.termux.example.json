@@ -18,7 +18,7 @@
     "base_url": "http://127.0.0.1:8080/v1",
     "context_size": 4096,
     "fallback_model": "",
-    "llama_server_path": "llama-server",
+    "llama_server_path": "auto",
     "models_dir": "models",
     "temperature": 0.7,
     "thinking_mode": "auto",

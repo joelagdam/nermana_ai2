@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from .agent import AgentCore
 from .capabilities import collect_capabilities
 from .config import load_config, merge_config, save_config
+from .model_downloads import download_model, download_preset, list_presets
 from .telegram_bot import TelegramBot
 
 
@@ -28,6 +29,13 @@ class ToolRunRequest(BaseModel):
 
 class ModelSwitchRequest(BaseModel):
     model_name: str
+
+
+class ModelDownloadRequest(BaseModel):
+    url: str = ""
+    preset_id: str = ""
+    filename: str = ""
+    select: bool = True
 
 
 class MemoryAddRequest(BaseModel):
@@ -84,7 +92,42 @@ def update_settings(patch: dict[str, Any]) -> dict[str, Any]:
 
 @app.get("/api/models")
 def models() -> dict[str, Any]:
-    return {"models": [model.__dict__ for model in agent.models.scan()], "health": agent.models.server_health()}
+    return {
+        "models": [model.__dict__ for model in agent.models.scan()],
+        "health": agent.models.server_health(),
+        "llama_server": agent.models.llama_server_status(),
+    }
+
+
+@app.get("/api/models/presets")
+def model_presets() -> dict[str, Any]:
+    return {"presets": list_presets()}
+
+
+@app.get("/api/models/llama")
+def llama_server() -> dict[str, Any]:
+    return agent.models.llama_server_status()
+
+
+@app.post("/api/models/llama/use-detected")
+def use_detected_llama_server() -> dict[str, Any]:
+    resolved = agent.models.resolve_llama_server()
+    if not resolved:
+        return {"ok": False, "error": "llama-server was not detected."}
+    agent.config.model.llama_server_path = resolved
+    save_config(agent.config)
+    return {"ok": True, "llama_server_path": resolved}
+
+
+@app.post("/api/models/download")
+def download_model_endpoint(request: ModelDownloadRequest) -> dict[str, Any]:
+    if request.preset_id:
+        result = download_preset(agent.config, request.preset_id, select=request.select)
+    else:
+        result = download_model(agent.config, request.url, request.filename, select=request.select)
+    if result.get("ok"):
+        save_config(agent.config)
+    return result
 
 
 @app.post("/api/models/select")

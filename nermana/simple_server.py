@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from .agent import AgentCore
 from .capabilities import collect_capabilities
 from .config import merge_config, save_config
+from .model_downloads import download_model, download_preset, list_presets
 from .telegram_bot import TelegramBot
 
 
@@ -45,7 +46,17 @@ class NermanaHandler(BaseHTTPRequestHandler):
         elif path == "/api/settings":
             self._json(self.agent.settings_snapshot())
         elif path == "/api/models":
-            self._json({"models": [model.__dict__ for model in self.agent.models.scan()], "health": self.agent.models.server_health()})
+            self._json(
+                {
+                    "models": [model.__dict__ for model in self.agent.models.scan()],
+                    "health": self.agent.models.server_health(),
+                    "llama_server": self.agent.models.llama_server_status(),
+                }
+            )
+        elif path == "/api/models/presets":
+            self._json({"presets": list_presets()})
+        elif path == "/api/models/llama":
+            self._json(self.agent.models.llama_server_status())
         elif path == "/api/tools":
             self._json({"tools": self.agent.tools.list_metadata()})
         elif path == "/api/memory":
@@ -86,6 +97,27 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._json(self.agent.models.restart_server())
         elif path == "/api/models/test":
             self._json(self.agent.models.chat([{"role": "user", "content": str(body.get("message", ""))}], max_tokens=128))
+        elif path == "/api/models/llama/use-detected":
+            resolved = self.agent.models.resolve_llama_server()
+            if not resolved:
+                self._json({"ok": False, "error": "llama-server was not detected."})
+            else:
+                self.agent.config.model.llama_server_path = resolved
+                save_config(self.agent.config)
+                self._json({"ok": True, "llama_server_path": resolved})
+        elif path == "/api/models/download":
+            if body.get("preset_id"):
+                result = download_preset(self.agent.config, str(body.get("preset_id")), select=bool(body.get("select", True)))
+            else:
+                result = download_model(
+                    self.agent.config,
+                    str(body.get("url", "")),
+                    str(body.get("filename", "")),
+                    select=bool(body.get("select", True)),
+                )
+            if result.get("ok"):
+                save_config(self.agent.config)
+            self._json(result)
         elif path.startswith("/api/tools/") and path.endswith("/enabled"):
             tool_name = path.split("/")[3]
             try:

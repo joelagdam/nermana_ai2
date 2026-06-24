@@ -38,6 +38,7 @@ async function refreshAll() {
   statusCache = await api("/api/status");
   statusLine.textContent = summarizeStatus(statusCache);
   fillForms();
+  renderPresets();
   renderModels();
   renderTools();
   renderMemory();
@@ -55,6 +56,7 @@ function summarizeStatus(status) {
 
 function fillForms() {
   setFormValues("modelSettings", {
+    models_dir: config.model.models_dir,
     base_url: config.model.base_url,
     llama_server_path: config.model.llama_server_path,
     context_size: config.model.context_size,
@@ -152,6 +154,7 @@ function addMessage(role, text) {
 
 async function renderModels() {
   const data = await api("/api/models");
+  renderLlamaStatus(data.llama_server);
   const list = document.getElementById("modelsList");
   list.innerHTML = "";
   data.models.forEach((model) => {
@@ -176,13 +179,61 @@ async function renderModels() {
   output("modelOutput", data.health);
 }
 
+async function renderPresets() {
+  const data = await api("/api/models/presets");
+  const select = document.querySelector("#modelDownload [name=preset_id]");
+  const current = select.value;
+  select.innerHTML = "";
+  const custom = document.createElement("option");
+  custom.value = "";
+  custom.textContent = "Direct link";
+  select.appendChild(custom);
+  data.presets.forEach((preset) => {
+    const option = document.createElement("option");
+    option.value = preset.id;
+    option.textContent = `${preset.name} - ${preset.size_hint}`;
+    option.title = preset.notes;
+    select.appendChild(option);
+  });
+  select.value = current;
+}
+
+function renderLlamaStatus(status) {
+  const node = document.getElementById("llamaStatus");
+  if (!status) {
+    node.textContent = "llama-server status unavailable";
+    return;
+  }
+  const found = status.available ? `found: ${status.resolved}` : "not found";
+  node.textContent = `llama-server ${found}. Checked PATH and ~/llama.cpp/build/bin/llama-server. Current setting: ${status.configured}.`;
+}
+
 document.getElementById("scanModels").addEventListener("click", renderModels);
 document.getElementById("restartModel").addEventListener("click", async () => output("modelOutput", await api("/api/models/restart", { method: "POST" })));
+document.getElementById("detectLlama").addEventListener("click", async () => {
+  output("modelOutput", await api("/api/models/llama/use-detected", { method: "POST" }));
+  await refreshAll();
+});
+document.getElementById("modelDownload").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const payload = {
+    preset_id: form.preset_id.value,
+    url: form.url.value,
+    filename: form.filename.value,
+    select: form.select.checked,
+  };
+  output("downloadOutput", "Downloading. Keep this page open.");
+  const result = await api("/api/models/download", { method: "POST", body: JSON.stringify(payload) });
+  output("downloadOutput", result);
+  await refreshAll();
+});
 document.getElementById("modelSettings").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   await savePatch({
     model: {
+      models_dir: form.models_dir.value,
       base_url: form.base_url.value,
       llama_server_path: form.llama_server_path.value,
       context_size: Number(form.context_size.value),

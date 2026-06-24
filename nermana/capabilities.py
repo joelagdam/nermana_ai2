@@ -29,7 +29,7 @@ def collect_capabilities(config: AppConfig, models: ModelManager, tools: ToolReg
     caps = [
         Capability("internet", internet_available(), "network probe"),
         Capability("local_model", bool(model_health.get("ok")), model_health.get("error", "server healthy")),
-        Capability("llama_server_binary", shutil.which(config.model.llama_server_path) is not None, config.model.llama_server_path),
+        Capability("llama_server_binary", models.resolve_llama_server() is not None, models.resolve_llama_server() or config.model.llama_server_path),
         Capability("termux_api", shutil.which("termux-battery-status") is not None, "termux-battery-status"),
         Capability("shizuku_rish", shutil.which(config.phone.rish_path) is not None, config.phone.rish_path),
         Capability("image_provider", bool(config.providers.image_enabled and config.providers.image_endpoint), config.providers.image_endpoint or "not configured"),

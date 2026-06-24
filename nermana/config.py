@@ -43,7 +43,7 @@ class ModelConfig:
     models_dir: str = "models"
     active_model: str = ""
     fallback_model: str = ""
-    llama_server_path: str = "llama-server"
+    llama_server_path: str = "auto"
     base_url: str = "http://127.0.0.1:8080/v1"
     context_size: int = 4096
     temperature: float = 0.7
