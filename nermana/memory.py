@@ -225,6 +225,44 @@ class MemoryStore:
             rows = conn.execute("SELECT * FROM memories ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
+    def get_memory(self, memory_id: int) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_memory(self, memory_id: int, patch: dict) -> dict:
+        current = self.get_memory(memory_id)
+        if current is None:
+            return {"ok": False, "error": "memory not found"}
+        content = str(patch.get("content", current["content"]))
+        tags = str(patch.get("tags", current["tags"]))
+        source = str(patch.get("source", current["source"]))
+        summary = str(patch.get("summary", current["summary"]))
+        entities = _json_list(patch.get("entities", current["entities"]))
+        topics = _json_list(patch.get("topics", current["topics"]))
+        try:
+            importance = float(patch.get("importance", current["importance"]))
+        except (TypeError, ValueError):
+            importance = float(current["importance"])
+        consolidated = 1 if bool(patch.get("consolidated", current["consolidated"])) else 0
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE memories
+                SET content=?, tags=?, source=?, summary=?, entities=?, topics=?, importance=?, consolidated=?
+                WHERE id=?
+                """,
+                (content, tags, source, summary, entities, topics, importance, consolidated, memory_id),
+            )
+            conn.execute("DELETE FROM memory_fts WHERE rowid=?", (memory_id,))
+            conn.execute(
+                "INSERT INTO memory_fts(rowid, content, tags, source) VALUES(?, ?, ?, ?)",
+                (memory_id, content, tags, source),
+            )
+        updated = self.get_memory(memory_id) or {}
+        updated["ok"] = True
+        return updated
+
     def count_memories(self) -> int:
         with self.connection() as conn:
             row = conn.execute("SELECT COUNT(*) AS total FROM memories").fetchone()

@@ -27,6 +27,7 @@ class SimpleNermanaServer:
         self.agent = agent or AgentCore()
         self.downloads: dict[str, dict] = {}
         self.download_lock = threading.Lock()
+        self.telegram_thread: threading.Thread | None = None
 
     def serve(self, host: str, port: int) -> None:
         outer = self
@@ -223,6 +224,17 @@ class SimpleNermanaServer:
             )
         return workers
 
+    def start_telegram(self) -> dict:
+        cfg = self.agent.config.telegram
+        if not cfg.enabled or not cfg.token:
+            return {"ok": False, "error": "Telegram is disabled or token is missing."}
+        if self.telegram_thread and self.telegram_thread.is_alive():
+            return {"ok": True, "message": "Telegram polling already running."}
+        bot = TelegramBot(self.agent)
+        self.telegram_thread = threading.Thread(target=bot.run_forever, name="nermana-telegram-web", daemon=True)
+        self.telegram_thread.start()
+        return {"ok": True, "message": "Telegram polling started.", "offset": bot.offset}
+
 
 class NermanaHandler(BaseHTTPRequestHandler):
     server_state: SimpleNermanaServer
@@ -263,6 +275,14 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._json({"memories": self.agent.memory.list_memories(int(query.get("limit", ["100"])[0]))})
         elif path == "/api/memory/search":
             self._json({"results": [hit.__dict__ for hit in self.agent.memory.search(query.get("q", [""])[0], int(query.get("limit", ["8"])[0]))]})
+        elif path.startswith("/api/memory/"):
+            try:
+                memory_id = int(path.rsplit("/", 1)[1])
+            except ValueError:
+                self._json({"ok": False, "error": "invalid memory id"}, HTTPStatus.BAD_REQUEST)
+                return
+            memory = self.agent.memory.get_memory(memory_id)
+            self._json(memory or {"ok": False, "error": "memory not found"}, HTTPStatus.OK if memory else HTTPStatus.NOT_FOUND)
         elif path == "/api/sessions":
             self._json({"sessions": self.agent.memory.list_sessions()})
         elif path.startswith("/api/sessions/") and path.endswith("/messages"):
@@ -295,6 +315,12 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._json(self.agent.settings_snapshot())
         elif path == "/api/models/select":
             result = self.agent.models.switch(str(body.get("model_name", "")))
+            self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST)
+        elif path == "/api/models/check":
+            result = self.agent.models.check_model(str(body.get("model_name", "")))
+            self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST)
+        elif path == "/api/models/delete":
+            result = self.agent.models.delete_model(str(body.get("model_name", "")), force=bool(body.get("force", False)))
             self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST)
         elif path == "/api/models/restart":
             self._json(self.agent.models.restart_server())
@@ -337,9 +363,24 @@ class NermanaHandler(BaseHTTPRequestHandler):
         elif path == "/api/memory":
             memory_id = self.agent.memory.remember(str(body.get("content", "")), tags=str(body.get("tags", "")), source=str(body.get("source", "web")))
             self._json({"ok": True, "memory_id": memory_id})
+        elif path.startswith("/api/memory/"):
+            try:
+                memory_id = int(path.rsplit("/", 1)[1])
+            except ValueError:
+                self._json({"ok": False, "error": "invalid memory id"}, HTTPStatus.BAD_REQUEST)
+                return
+            result = self.agent.memory.update_memory(memory_id, body)
+            self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.NOT_FOUND)
         elif path == "/api/telegram/poll_once":
             try:
-                self._json(TelegramBot(self.agent).poll_once())
+                self._json(TelegramBot(self.agent).poll_once(timeout=1))
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)})
+        elif path == "/api/telegram/start":
+            self._json(self.server_state.start_telegram())
+        elif path == "/api/telegram/reset_offset":
+            try:
+                self._json(TelegramBot(self.agent).reset_offset())
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)})
         elif path == "/api/update":

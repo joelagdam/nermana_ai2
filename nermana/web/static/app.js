@@ -26,6 +26,9 @@ document.getElementById("refreshButton").addEventListener("click", () => runActi
 document.querySelectorAll("[data-jump]").forEach((button) => {
   button.addEventListener("click", () => showPage(button.dataset.jump));
 });
+document.querySelectorAll("[data-model-tab]").forEach((button) => {
+  button.addEventListener("click", () => showModelTab(button.dataset.modelTab));
+});
 
 function showPage(id) {
   pages.forEach((page) => page.classList.toggle("active", page.id === id));
@@ -45,6 +48,15 @@ function openDrawer() {
 function closeDrawer() {
   rail.classList.remove("open");
   drawerBackdrop.classList.remove("open");
+}
+
+function showModelTab(id) {
+  document.querySelectorAll("[data-model-tab]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.modelTab === id);
+  });
+  document.querySelectorAll(".model-tab").forEach((panel) => {
+    panel.classList.toggle("active", panel.id === `modelTab-${id}`);
+  });
 }
 
 async function api(path, options = {}) {
@@ -182,6 +194,16 @@ function simpleValue(value) {
 
 function labelize(key) {
   return String(key).replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function parseStoredList(value) {
+  if (Array.isArray(value)) return value.join(", ");
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed.join(", ") : String(value || "");
+  } catch {
+    return String(value || "");
+  }
 }
 
 function delay(ms) {
@@ -544,7 +566,24 @@ async function renderModels() {
       await refreshAll();
     });
     select.disabled = !model.loadable;
-    list.appendChild(makeRow(model.name, `${model.size_mb} MB ${model.loadable ? "" : "(.guff typo)"}`, [badge(model.active ? "active" : "idle", !model.active), select]));
+    const check = button("Check", async () => {
+      const result = await runAction("Model check", () => api("/api/models/check", { method: "POST", body: JSON.stringify({ model_name: model.name }) }), "Model checked");
+      renderResult("modelOutput", result);
+      showModelTab("test");
+    });
+    const remove = button("Delete", async () => {
+      const result = await runAction("Delete model", () => api("/api/models/delete", { method: "POST", body: JSON.stringify({ model_name: model.name }) }), "Model deleted");
+      renderResult("modelOutput", result);
+      await renderModels();
+    });
+    remove.disabled = model.active;
+    list.appendChild(
+      makeRow(
+        model.name,
+        `${model.size_mb} MB | ${model.loadable ? "GGUF" : ".guff typo"} | ${model.active ? "active" : "idle"}`,
+        [badge(model.active ? "active" : "idle", !model.active), select, check, remove]
+      )
+    );
   });
   renderResult("modelOutput", data.health);
 }
@@ -660,6 +699,10 @@ document.getElementById("restartModel").addEventListener("click", async () => {
   const result = await runAction("Model server", () => api("/api/models/restart", { method: "POST" }), "Restart requested");
   renderResult("modelOutput", result);
 });
+document.getElementById("startModel").addEventListener("click", async () => {
+  const result = await runAction("Model server", () => api("/api/models/restart", { method: "POST" }), "Start requested");
+  renderResult("modelOutput", result);
+});
 document.getElementById("detectLlama").addEventListener("click", async () => {
   const result = await runAction("llama-server", () => api("/api/models/llama/use-detected", { method: "POST" }), "Path saved");
   renderResult("modelOutput", result);
@@ -752,12 +795,30 @@ async function renderMemory() {
     list.appendChild(makeRow("No memories yet", "empty store"));
   }
   data.memories.forEach((memory) => {
+    const edit = button("Edit", () => fillMemoryEdit(memory));
     const forget = button("Forget", async () => {
       await runAction("Memory", () => api(`/api/memory/${memory.id}`, { method: "DELETE" }), "Memory removed");
       await renderMemory();
     });
-    list.appendChild(makeRow(memory.source || "memory", memory.tags || "", [forget], memory.content.slice(0, 320)));
+    const meta = `#${memory.id} | ${memory.source || "memory"} | ${memory.tags || "untagged"} | importance ${memory.importance ?? "n/a"}`;
+    const body = `${memory.summary || ""}${memory.summary ? "\n" : ""}${memory.content || ""}`.slice(0, 420);
+    list.appendChild(makeRow("Memory", meta, [edit, forget], body));
   });
+}
+
+function fillMemoryEdit(memory) {
+  const form = document.getElementById("memoryEdit");
+  form.hidden = false;
+  form.elements.id.value = memory.id;
+  form.elements.source.value = memory.source || "";
+  form.elements.tags.value = memory.tags || "";
+  form.elements.importance.value = memory.importance ?? 0.5;
+  form.elements.consolidated.checked = Boolean(memory.consolidated);
+  form.elements.entities.value = parseStoredList(memory.entities);
+  form.elements.topics.value = parseStoredList(memory.topics);
+  form.elements.summary.value = memory.summary || "";
+  form.elements.content.value = memory.content || "";
+  form.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 document.getElementById("memorySearch").addEventListener("submit", async (event) => {
@@ -767,7 +828,7 @@ document.getElementById("memorySearch").addEventListener("submit", async (event)
   const list = document.getElementById("memoryList");
   list.innerHTML = "";
   (data.results || []).forEach((memory) => {
-    list.appendChild(makeRow(memory.source, memory.tags, [], memory.content));
+    list.appendChild(makeRow(memory.source, memory.tags, [button("Edit", () => fillMemoryEdit(memory))], memory.content));
   });
 });
 document.getElementById("memoryAdd").addEventListener("submit", async (event) => {
@@ -776,6 +837,27 @@ document.getElementById("memoryAdd").addEventListener("submit", async (event) =>
   await runAction("Memory", () => api("/api/memory", { method: "POST", body: JSON.stringify({ content: form.content.value, tags: form.tags.value }) }), "Memory added");
   form.reset();
   await renderMemory();
+});
+document.getElementById("memoryEdit").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const payload = {
+    content: form.elements.content.value,
+    summary: form.elements.summary.value,
+    source: form.elements.source.value,
+    tags: form.elements.tags.value,
+    importance: Number(form.elements.importance.value),
+    consolidated: form.elements.consolidated.checked,
+    entities: form.elements.entities.value,
+    topics: form.elements.topics.value,
+  };
+  const result = await runAction("Memory", () => api(`/api/memory/${form.elements.id.value}`, { method: "POST", body: JSON.stringify(payload) }), "Memory saved");
+  renderResult("memoryOutput", result);
+  form.hidden = true;
+  await renderMemory();
+});
+document.getElementById("cancelMemoryEdit").addEventListener("click", () => {
+  document.getElementById("memoryEdit").hidden = true;
 });
 
 document.getElementById("fileSettings").addEventListener("submit", async (event) => {
@@ -853,6 +935,14 @@ document.getElementById("telegramSettings").addEventListener("submit", async (ev
 });
 document.getElementById("telegramPoll").addEventListener("click", async () => {
   const result = await runAction("Telegram", () => api("/api/telegram/poll_once", { method: "POST" }), "Poll complete");
+  renderResult("telegramOutput", result);
+});
+document.getElementById("telegramStart").addEventListener("click", async () => {
+  const result = await runAction("Telegram", () => api("/api/telegram/start", { method: "POST" }), "Polling started");
+  renderResult("telegramOutput", result);
+});
+document.getElementById("telegramResetOffset").addEventListener("click", async () => {
+  const result = await runAction("Telegram", () => api("/api/telegram/reset_offset", { method: "POST" }), "Offset reset");
   renderResult("telegramOutput", result);
 });
 

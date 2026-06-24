@@ -107,6 +107,42 @@ class ModelManager:
         self._save()
         return {"ok": True, "active_model": model_name, "previous_model": previous}
 
+    def check_model(self, model_name: str) -> dict[str, Any]:
+        match = next((model for model in self.scan() if model.name == model_name), None)
+        if match is None:
+            return {"ok": False, "error": f"Model not found: {model_name}"}
+        result = {
+            "ok": True,
+            "name": match.name,
+            "path": match.path,
+            "size_mb": match.size_mb,
+            "active": match.active,
+            "loadable": match.loadable,
+            "status": "active" if match.active else "idle",
+        }
+        if match.active:
+            result["server_health"] = self.server_health()
+        return result
+
+    def delete_model(self, model_name: str, force: bool = False) -> dict[str, Any]:
+        match = next((model for model in self.scan() if model.name == model_name), None)
+        if match is None:
+            return {"ok": False, "error": f"Model not found: {model_name}"}
+        if match.active and not force:
+            return {"ok": False, "error": "Refusing to delete the active model. Switch models first or pass force=true."}
+        root = self.models_dir.resolve()
+        target = Path(match.path).resolve()
+        if not (target == root or root in target.parents):
+            return {"ok": False, "error": "Model path is outside the models folder."}
+        try:
+            target.unlink()
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+        if self.config.model.active_model == model_name:
+            self.config.model.active_model = ""
+            self._save()
+        return {"ok": True, "deleted": model_name, "path": str(target)}
+
     def server_health(self) -> dict[str, Any]:
         response = get_json(f"{self.config.model.base_url.rstrip('/')}/models", timeout=2)
         if response.ok:

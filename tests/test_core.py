@@ -67,6 +67,21 @@ class ModelTests(unittest.TestCase):
             self.assertEqual(cfg.model.active_model, "tiny.gguf")
             self.assertFalse(manager.switch("typo.guff")["ok"])
 
+    def test_check_and_delete_idle_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "models"
+            model_dir.mkdir()
+            model = model_dir / "idle.gguf"
+            model.write_bytes(b"model")
+            cfg = AppConfig(model=ModelConfig(models_dir=str(model_dir), active_model=""))
+            manager = ModelManager(cfg, persist=False)
+            check = manager.check_model("idle.gguf")
+            self.assertTrue(check["ok"])
+            self.assertEqual(check["status"], "idle")
+            deleted = manager.delete_model("idle.gguf")
+            self.assertTrue(deleted["ok"])
+            self.assertFalse(model.exists())
+
     def test_detects_llama_server_in_home_build(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -117,6 +132,15 @@ class MemoryTests(unittest.TestCase):
             self.assertTrue(any(hit.id == memory_id for hit in hits))
             self.assertEqual(store.count_memories(), 1)
             self.assertTrue(store.forget(memory_id))
+
+    def test_memory_update_keeps_search_index_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(MemoryConfig(db_path=str(Path(tmp) / "memory.sqlite3")))
+            memory_id = store.remember("old phrase", tags="old", source="test")
+            result = store.update_memory(memory_id, {"content": "new searchable phrase", "tags": "new", "importance": 0.9})
+            self.assertTrue(result["ok"])
+            hits = store.search("searchable")
+            self.assertTrue(any(hit.id == memory_id for hit in hits))
 
     def test_memory_consolidates_structured_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -329,7 +353,7 @@ class TelegramTests(unittest.TestCase):
     def test_telegram_poll_accepts_text_and_sends_reply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(
-                telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7]),
+                telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7], offset_path=str(Path(tmp) / "offset.txt")),
                 memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
             )
             agent = AgentCore(cfg)
@@ -341,6 +365,21 @@ class TelegramTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["processed"], 1)
             self.assertTrue(send.called)
+
+    def test_telegram_persists_offset_between_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[], offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            update = {"update_id": 11, "message": {"chat": {"id": 123}, "from": {"id": 7}, "text": "/start@NermanaBot"}}
+            with patch("nermana.telegram_bot.get_json", return_value=HttpResponse(True, 200, {"ok": True, "result": [update]})), patch(
+                "nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})
+            ):
+                first = TelegramBot(agent).poll_once(timeout=1)
+            self.assertEqual(first["offset"], 12)
+            self.assertEqual(TelegramBot(agent).offset, 12)
 
 
 class StartupTests(unittest.TestCase):

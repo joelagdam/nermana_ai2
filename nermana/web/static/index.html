@@ -97,59 +97,76 @@
         </section>
 
         <section id="models" class="page">
-          <div class="toolbar">
-            <button id="scanModels">Scan Models</button>
-            <button id="restartModel">Restart Server</button>
-            <button id="detectLlama">Use Detected llama-server</button>
+          <div class="segmented-tabs" data-tab-group="models">
+            <button type="button" class="active" data-model-tab="manage">Manage</button>
+            <button type="button" data-model-tab="download">Download</button>
+            <button type="button" data-model-tab="runtime">Settings</button>
+            <button type="button" data-model-tab="test">Test</button>
           </div>
-          <div id="llamaStatus" class="setup-panel"></div>
-          <div id="presetsList" class="list preset-list"></div>
-          <div id="modelsList" class="list"></div>
-          <form id="modelDownload" class="grid-form">
-            <label>Preset
-              <select name="preset_id"></select>
-            </label>
-            <label>Direct GGUF link <input name="url" placeholder="https://...model.gguf" /></label>
-            <label>Save as <input name="filename" placeholder="optional-name.gguf" /></label>
-            <label>Select after download <input name="select" type="checkbox" checked /></label>
-            <button class="primary-action">Download Model</button>
-          </form>
-          <div id="downloadProgress" class="progress-panel" hidden>
-            <div>
-              <strong id="downloadProgressTitle">Download</strong>
-              <span id="downloadProgressText">Starting</span>
+          <div class="model-tab active" id="modelTab-manage">
+            <div class="toolbar">
+              <button id="scanModels">Scan Models</button>
             </div>
-            <progress id="downloadProgressBar" max="100" value="0"></progress>
+            <div id="modelsList" class="list"></div>
           </div>
-          <form id="modelSettings" class="grid-form">
-            <label>Models folder <input name="models_dir" placeholder="models" /></label>
-            <label>Base URL <input name="base_url" /></label>
-            <label>llama-server <input name="llama_server_path" placeholder="auto or ~/llama.cpp/build/bin/llama-server" /></label>
-            <label>Context <input name="context_size" type="number" min="512" step="512" /></label>
-            <label>Threads <input name="threads" type="number" min="0" /></label>
-            <label>Batch <input name="batch_size" type="number" min="64" step="64" /></label>
-            <label>Micro batch <input name="ubatch_size" type="number" min="32" step="32" /></label>
-            <label>Parallel slots <input name="parallel_slots" type="number" min="1" /></label>
-            <label>Timeout seconds <input name="request_timeout_seconds" type="number" min="15" step="5" /></label>
-            <label>Lock model in RAM <input name="mlock" type="checkbox" /></label>
-            <label>No mmap <input name="no_mmap" type="checkbox" /></label>
-            <label>Temperature <input name="temperature" type="number" step="0.05" min="0" max="2" /></label>
-            <label>Top P <input name="top_p" type="number" step="0.05" min="0" max="1" /></label>
-            <label>Thinking
-              <select name="thinking_mode">
-                <option value="auto">auto</option>
-                <option value="no_think">no_think</option>
-                <option value="think">think</option>
-              </select>
-            </label>
-            <button class="primary-action">Save Model Settings</button>
-          </form>
-          <form id="modelTest" class="inline-form">
-            <input name="message" placeholder="Model test prompt" />
-            <button>Test</button>
-          </form>
-          <div id="downloadOutput" class="result-panel"></div>
-          <div id="modelOutput" class="result-panel"></div>
+          <div class="model-tab" id="modelTab-download">
+            <div id="presetsList" class="list preset-list"></div>
+            <form id="modelDownload" class="grid-form">
+              <label>Preset
+                <select name="preset_id"></select>
+              </label>
+              <label>Direct GGUF link <input name="url" placeholder="https://...model.gguf" /></label>
+              <label>Save as <input name="filename" placeholder="optional-name.gguf" /></label>
+              <label>Select after download <input name="select" type="checkbox" checked /></label>
+              <button class="primary-action">Download Model</button>
+            </form>
+            <div id="downloadProgress" class="progress-panel" hidden>
+              <div>
+                <strong id="downloadProgressTitle">Download</strong>
+                <span id="downloadProgressText">Starting</span>
+              </div>
+              <progress id="downloadProgressBar" max="100" value="0"></progress>
+            </div>
+            <div id="downloadOutput" class="result-panel"></div>
+          </div>
+          <div class="model-tab" id="modelTab-runtime">
+            <div class="toolbar">
+              <button id="restartModel">Restart Server</button>
+              <button id="startModel">Start Server</button>
+              <button id="detectLlama">Use Detected llama-server</button>
+            </div>
+            <div id="llamaStatus" class="setup-panel"></div>
+            <form id="modelSettings" class="grid-form">
+              <label>Models folder <input name="models_dir" placeholder="models" /></label>
+              <label>Base URL <input name="base_url" /></label>
+              <label>llama-server <input name="llama_server_path" placeholder="auto or ~/llama.cpp/build/bin/llama-server" /></label>
+              <label>Context <input name="context_size" type="number" min="512" step="512" /></label>
+              <label>Threads <input name="threads" type="number" min="0" /></label>
+              <label>Batch <input name="batch_size" type="number" min="64" step="64" /></label>
+              <label>Micro batch <input name="ubatch_size" type="number" min="32" step="32" /></label>
+              <label>Parallel slots <input name="parallel_slots" type="number" min="1" /></label>
+              <label>Timeout seconds <input name="request_timeout_seconds" type="number" min="15" step="5" /></label>
+              <label>Lock model in RAM <input name="mlock" type="checkbox" /></label>
+              <label>No mmap <input name="no_mmap" type="checkbox" /></label>
+              <label>Temperature <input name="temperature" type="number" step="0.05" min="0" max="2" /></label>
+              <label>Top P <input name="top_p" type="number" step="0.05" min="0" max="1" /></label>
+              <label>Thinking
+                <select name="thinking_mode">
+                  <option value="auto">auto</option>
+                  <option value="no_think">no_think</option>
+                  <option value="think">think</option>
+                </select>
+              </label>
+              <button class="primary-action">Save Model Settings</button>
+            </form>
+          </div>
+          <div class="model-tab" id="modelTab-test">
+            <form id="modelTest" class="inline-form">
+              <input name="message" placeholder="Model test prompt" />
+              <button>Test</button>
+            </form>
+            <div id="modelOutput" class="result-panel"></div>
+          </div>
         </section>
 
         <section id="tools" class="page">
@@ -183,6 +200,20 @@
             <input name="tags" placeholder="tags" />
             <button class="primary-action">Add Memory</button>
           </form>
+          <form id="memoryEdit" class="grid-form" hidden>
+            <label>ID <input name="id" readonly /></label>
+            <label>Source <input name="source" /></label>
+            <label>Tags <input name="tags" /></label>
+            <label>Importance <input name="importance" type="number" min="0" max="1" step="0.05" /></label>
+            <label>Consolidated <input name="consolidated" type="checkbox" /></label>
+            <label>Entities <input name="entities" placeholder="comma separated" /></label>
+            <label>Topics <input name="topics" placeholder="comma separated" /></label>
+            <label>Summary <textarea name="summary"></textarea></label>
+            <label>Content <textarea name="content"></textarea></label>
+            <button class="primary-action">Save Memory</button>
+            <button id="cancelMemoryEdit" type="button">Cancel</button>
+          </form>
+          <div id="memoryOutput" class="result-panel"></div>
           <div id="memoryList" class="list"></div>
         </section>
 
@@ -280,7 +311,11 @@
             <label>Allowed user IDs <input name="telegram.allowed_user_ids" /></label>
             <button class="primary-action">Save Telegram</button>
           </form>
-          <button id="telegramPoll">Poll Once</button>
+          <div class="toolbar">
+            <button id="telegramStart">Start Polling</button>
+            <button id="telegramPoll">Poll Once</button>
+            <button id="telegramResetOffset">Reset Offset</button>
+          </div>
           <div id="telegramOutput" class="result-panel"></div>
         </section>
 

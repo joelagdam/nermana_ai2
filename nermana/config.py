@@ -117,6 +117,7 @@ class TelegramConfig:
     token: str = ""
     allowed_user_ids: list[int] = field(default_factory=list)
     poll_interval_seconds: float = 2.0
+    offset_path: str = "data/telegram_offset.txt"
 
 
 @dataclass

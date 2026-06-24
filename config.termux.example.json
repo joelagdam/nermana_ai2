@@ -80,6 +80,7 @@
   "telegram": {
     "allowed_user_ids": [],
     "enabled": false,
+    "offset_path": "data/telegram_offset.txt",
     "poll_interval_seconds": 2.0,
     "token": ""
   },

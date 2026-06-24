@@ -385,6 +385,27 @@ p {
   margin-bottom: 12px;
 }
 
+.segmented-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.segmented-tabs button.active {
+  border-color: rgba(106, 56, 255, 0.34);
+  background: linear-gradient(135deg, rgba(106, 56, 255, 0.14), rgba(0, 152, 199, 0.1));
+  box-shadow: var(--soft-shadow);
+}
+
+.model-tab {
+  display: none;
+}
+
+.model-tab.active {
+  display: block;
+}
+
 .dashboard-layout {
   display: grid;
   grid-template-columns: minmax(280px, 1.35fr) minmax(240px, 1fr);
