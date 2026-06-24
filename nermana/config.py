@@ -56,7 +56,7 @@ class ModelConfig:
     no_mmap: bool = False
     request_timeout_seconds: float = 120.0
     thinking_mode: str = "auto"
-    auto_start_server: bool = False
+    auto_start_server: bool = True
 
 
 @dataclass
@@ -124,6 +124,8 @@ class MemoryConfig:
     db_path: str = "data/nermana.sqlite3"
     retain_messages: int = 200
     auto_remember: bool = True
+    consolidate_every_seconds: float = 900.0
+    min_consolidate_items: int = 4
 
 
 @dataclass

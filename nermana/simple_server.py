@@ -129,6 +129,7 @@ class SimpleNermanaServer:
         tools = list(agent_status.get("tools", []))
         sessions = list(agent_status.get("sessions", []))
         memory_count = self.agent.memory.count_memories()
+        memory_insights = self.agent.memory.list_consolidations(limit=20)
         recent_memories = self.agent.memory.list_memories(5)
         downloads = self.list_downloads()
         active_downloads = [job for job in downloads if job.get("state") in {"queued", "running"}]
@@ -150,6 +151,8 @@ class SimpleNermanaServer:
                 "tools_working": len(available_tools),
                 "sessions": len(sessions),
                 "memories": memory_count,
+                "memory_insights": len(memory_insights),
+                "memory_unconsolidated": self.agent.memory.count_unconsolidated(),
                 "downloads_total": len(downloads),
                 "downloads_active": len(active_downloads),
                 "model": self.agent.config.model.active_model or "no model selected",

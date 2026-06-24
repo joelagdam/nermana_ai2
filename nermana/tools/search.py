@@ -88,26 +88,98 @@ def _search_searxng(config: AppConfig, query: str, page: int) -> dict:
 
 
 def _search_duckduckgo(config: AppConfig, query: str) -> dict:
+    errors = []
+    for url in _duckduckgo_urls(query):
+        html_result = _fetch_duckduckgo_html(config, url)
+        if not html_result.get("ok"):
+            errors.append(html_result.get("error", "search unavailable"))
+            continue
+        parser = DuckDuckGoParser(config.search.max_results)
+        parser.feed(html_result["html"])
+        parser.close()
+        if parser.results:
+            return {"ok": True, "provider": "duckduckgo", "query": query, "results": parser.results}
+        errors.append("no parseable DuckDuckGo HTML results")
+    instant = _search_duckduckgo_instant(config, query)
+    if instant.get("ok") and instant.get("results"):
+        if errors:
+            instant["fallback_error"] = "; ".join(errors[:2])
+        return instant
+    if instant.get("error"):
+        errors.append(instant["error"])
+    return {"ok": False, "error": "search unavailable: " + "; ".join(errors[:3])}
+
+
+def _duckduckgo_urls(query: str) -> list[str]:
     params = urllib.parse.urlencode({"q": query})
-    request = urllib.request.Request(
+    return [
         f"https://html.duckduckgo.com/html/?{params}",
+        f"https://lite.duckduckgo.com/lite/?{params}",
+    ]
+
+
+def _fetch_duckduckgo_html(config: AppConfig, url: str) -> dict:
+    request = urllib.request.Request(
+        url,
         headers={
-            "User-Agent": "Nermana-Termux/0.1",
+            "User-Agent": "Mozilla/5.0 (Linux; Android; Termux) Nermana/0.1",
             "Accept": "text/html,application/xhtml+xml",
         },
     )
     try:
         with urllib.request.urlopen(request, timeout=config.search.timeout_seconds) as response:
-            html = response.read().decode("utf-8", errors="replace")
+            return {"ok": True, "html": response.read().decode("utf-8", errors="replace")}
     except urllib.error.HTTPError as exc:
-        return {"ok": False, "error": f"search unavailable: HTTP {exc.code}"}
+        return {"ok": False, "error": f"HTTP {exc.code}"}
     except Exception as exc:
-        return {"ok": False, "error": f"search unavailable: {exc}"}
+        return {"ok": False, "error": str(exc)}
 
-    parser = DuckDuckGoParser(config.search.max_results)
-    parser.feed(html)
-    parser.close()
-    return {"ok": True, "provider": "duckduckgo", "query": query, "results": parser.results}
+
+def _search_duckduckgo_instant(config: AppConfig, query: str) -> dict:
+    response = get_json(
+        "https://api.duckduckgo.com/",
+        {"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
+        timeout=config.search.timeout_seconds,
+        headers={"User-Agent": "Nermana-Termux/0.1"},
+    )
+    if not response.ok:
+        return {"ok": False, "error": f"instant answer unavailable: {response.error}"}
+    results = []
+    abstract = response.data.get("AbstractText") or response.data.get("Abstract")
+    if abstract:
+        results.append(
+            {
+                "title": response.data.get("Heading") or query,
+                "url": response.data.get("AbstractURL") or "",
+                "content": abstract,
+                "engine": "duckduckgo-instant",
+            }
+        )
+    for topic in _instant_topics(response.data.get("RelatedTopics") or []):
+        if len(results) >= config.search.max_results:
+            break
+        results.append(topic)
+    return {"ok": True, "provider": "duckduckgo-instant", "query": query, "results": results[: config.search.max_results]}
+
+
+def _instant_topics(items: list) -> list[dict]:
+    results = []
+    for item in items:
+        if "Topics" in item:
+            results.extend(_instant_topics(item.get("Topics") or []))
+            continue
+        text = item.get("Text")
+        if not text:
+            continue
+        results.append(
+            {
+                "title": text.split(" - ", 1)[0][:100],
+                "url": item.get("FirstURL", ""),
+                "content": text,
+                "engine": "duckduckgo-instant",
+            }
+        )
+    return results
 
 
 class DuckDuckGoParser(HTMLParser):
@@ -126,6 +198,11 @@ class DuckDuckGoParser(HTMLParser):
             self._finish_current()
             self.current = {"title": "", "url": _clean_duckduckgo_url(attr.get("href", "")), "content": "", "engine": "duckduckgo"}
             self.in_title = True
+        elif tag == "a" and attr.get("href") and self.current is None and len(self.results) < self.max_results:
+            href = attr.get("href", "")
+            if not href.startswith("/") and ("duckduckgo.com" not in href or "uddg=" in href):
+                self.current = {"title": "", "url": _clean_duckduckgo_url(href), "content": "", "engine": "duckduckgo"}
+                self.in_title = True
         elif "result__snippet" in classes or "result-snippet" in classes:
             self.in_snippet = True
 
@@ -156,6 +233,9 @@ class DuckDuckGoParser(HTMLParser):
             self.in_title = False
             self.in_snippet = False
             return
+        title = (self.current or {}).get("title", "").strip()
+        if title.lower() in {"next", "next page", "previous", "previous page", "home"}:
+            self.current = None
         if self.current and self.current.get("title") and self.current.get("url"):
             self.results.append(self.current)
         self.current = None

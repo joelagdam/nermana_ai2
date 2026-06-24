@@ -9,13 +9,15 @@ from pathlib import Path
 
 from nermana.agent import AgentCore
 from nermana.capabilities import Capability
-from nermana.config import AppConfig, FileConfig, MemoryConfig, ModelConfig, SafetyConfig, SearchConfig, merge_config, save_config
+from nermana.config import AppConfig, FileConfig, MemoryConfig, ModelConfig, SafetyConfig, SearchConfig, TelegramConfig, merge_config, save_config
+from nermana.http_client import HttpResponse
 from nermana.model_downloads import download_model, list_presets
 from nermana.memory import MemoryStore
 from nermana.models import ModelManager
 from nermana.safety import DecisionGate
 from nermana.simple_server import SimpleNermanaServer
 from nermana.startup import StartupManager
+from nermana.telegram_bot import TelegramBot
 from nermana.tooling import Tool, ToolRegistry
 from nermana.tools.files import register_file_tools
 from nermana.tools.search import register_search_tools
@@ -116,6 +118,16 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(store.count_memories(), 1)
             self.assertTrue(store.forget(memory_id))
 
+    def test_memory_consolidates_structured_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(MemoryConfig(db_path=str(Path(tmp) / "memory.sqlite3")))
+            store.remember("Nermana should answer weather as a short summary.", tags="nermana,weather", source="test")
+            store.remember("Nermana needs search results summarized instead of raw JSON.", tags="nermana,search", source="test")
+            result = store.consolidate(limit=4)
+            self.assertTrue(result["consolidated"])
+            self.assertEqual(store.count_unconsolidated(), 0)
+            self.assertTrue(store.list_consolidations())
+
     def test_relative_memory_path_uses_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "project"
@@ -165,6 +177,19 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(result["provider"], "duckduckgo")
         self.assertEqual(result["results"][0]["url"], "https://example.com/page")
         self.assertIn("Useful snippet", result["results"][0]["content"])
+
+    def test_duckduckgo_lite_fallback_parses_results(self) -> None:
+        html = b"""
+        <a rel="nofollow" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Flite">Lite result</a>
+        <td class="result-snippet">Lite snippet text.</td>
+        """
+        cfg = AppConfig(search=SearchConfig(enabled=True, provider="duckduckgo", max_results=3))
+        registry = ToolRegistry(cfg)
+        register_search_tools(registry, cfg)
+        with patch("urllib.request.urlopen", return_value=FakeUrlResponse([html])):
+            result = registry.run("web_search", {"query": "hello"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["results"][0]["url"], "https://example.com/lite")
 
     def test_file_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -216,6 +241,52 @@ class AgentTests(unittest.TestCase):
             self.assertIn("save that to memory", result["reply"].lower())
             saved = agent.chat("yes", session_id="mem")
             self.assertIn("Saved to memory", saved["reply"])
+
+    def test_agent_summarizes_weather_tool_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            text = agent._tool_result_to_text(
+                {
+                    "ok": True,
+                    "location": "Tagum City",
+                    "weather": {
+                        "current": {"temperature_2m": 30, "apparent_temperature": 34, "relative_humidity_2m": 72, "wind_speed_10m": 8, "weather_code": 61},
+                        "current_units": {"temperature_2m": "C", "wind_speed_10m": "km/h"},
+                        "daily": {"time": ["2026-06-25"], "temperature_2m_max": [32], "temperature_2m_min": [25], "precipitation_probability_max": [80]},
+                    },
+                }
+            )
+            self.assertIn("Weather for Tagum City", text)
+            self.assertIn("rain", text.lower())
+            self.assertNotIn("{", text)
+
+    def test_agent_offline_core_has_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            with patch.object(agent.models, "chat", return_value={"ok": False, "error": "offline"}):
+                result = agent.chat("who are you?", session_id="identity")
+            self.assertIn("Nermana", result["reply"])
+            self.assertIn("local-first", result["reply"])
+
+
+class TelegramTests(unittest.TestCase):
+    def test_telegram_poll_accepts_text_and_sends_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7]),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            update = {"update_id": 5, "message": {"chat": {"id": 123}, "from": {"id": 7}, "text": "/start"}}
+            with patch("nermana.telegram_bot.get_json", return_value=HttpResponse(True, 200, {"ok": True, "result": [update]})), patch(
+                "nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})
+            ) as send:
+                result = TelegramBot(agent).poll_once()
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["processed"], 1)
+            self.assertTrue(send.called)
 
 
 class StartupTests(unittest.TestCase):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -17,6 +19,12 @@ class MemoryHit:
     tags: str
     source: str
     created_at: float
+    summary: str = ""
+    entities: str = "[]"
+    topics: str = "[]"
+    importance: float = 0.5
+    consolidated: int = 0
+    connections: str = "[]"
 
 
 class MemoryStore:
@@ -70,6 +78,25 @@ class MemoryStore:
                     content TEXT NOT NULL,
                     tags TEXT NOT NULL DEFAULT '',
                     source TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    entities TEXT NOT NULL DEFAULT '[]',
+                    topics TEXT NOT NULL DEFAULT '[]',
+                    importance REAL NOT NULL DEFAULT 0.5,
+                    consolidated INTEGER NOT NULL DEFAULT 0,
+                    connections TEXT NOT NULL DEFAULT '[]'
+                )
+                """
+            )
+            self._ensure_memory_columns(conn)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS consolidations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_ids TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    insight TEXT NOT NULL,
+                    connections TEXT NOT NULL DEFAULT '[]',
                     created_at REAL NOT NULL
                 )
                 """
@@ -80,6 +107,20 @@ class MemoryStore:
                 USING fts5(content, tags, source)
                 """
             )
+
+    def _ensure_memory_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+        columns = {
+            "summary": "TEXT NOT NULL DEFAULT ''",
+            "entities": "TEXT NOT NULL DEFAULT '[]'",
+            "topics": "TEXT NOT NULL DEFAULT '[]'",
+            "importance": "REAL NOT NULL DEFAULT 0.5",
+            "consolidated": "INTEGER NOT NULL DEFAULT 0",
+            "connections": "TEXT NOT NULL DEFAULT '[]'",
+        }
+        for name, declaration in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE memories ADD COLUMN {name} {declaration}")
 
     def ensure_session(self, session_id: str, title: str = "") -> None:
         now = time.time()
@@ -120,13 +161,30 @@ class MemoryStore:
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
-    def remember(self, content: str, tags: Iterable[str] | str = "", source: str = "manual") -> int:
+    def remember(
+        self,
+        content: str,
+        tags: Iterable[str] | str = "",
+        source: str = "manual",
+        summary: str = "",
+        entities: Iterable[str] | str | None = None,
+        topics: Iterable[str] | str | None = None,
+        importance: float | None = None,
+    ) -> int:
         tag_text = ",".join(tags) if not isinstance(tags, str) else tags
         now = time.time()
+        structured = self._structure_memory(content, tag_text, source)
+        summary = summary or structured["summary"]
+        entity_text = _json_list(entities if entities is not None else structured["entities"])
+        topic_text = _json_list(topics if topics is not None else structured["topics"])
+        score = float(structured["importance"] if importance is None else importance)
         with self.connection() as conn:
             cursor = conn.execute(
-                "INSERT INTO memories(content, tags, source, created_at) VALUES(?, ?, ?, ?)",
-                (content, tag_text, source, now),
+                """
+                INSERT INTO memories(content, tags, source, created_at, summary, entities, topics, importance)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (content, tag_text, source, now, summary, entity_text, topic_text, score),
             )
             memory_id = int(cursor.lastrowid)
             conn.execute(
@@ -172,6 +230,59 @@ class MemoryStore:
             row = conn.execute("SELECT COUNT(*) AS total FROM memories").fetchone()
         return int(row["total"] if row else 0)
 
+    def count_unconsolidated(self) -> int:
+        with self.connection() as conn:
+            row = conn.execute("SELECT COUNT(*) AS total FROM memories WHERE consolidated = 0").fetchone()
+        return int(row["total"] if row else 0)
+
+    def list_consolidations(self, limit: int = 10) -> list[dict]:
+        with self.connection() as conn:
+            rows = conn.execute("SELECT * FROM consolidations ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def consolidate_due(self, min_items: int = 4) -> dict:
+        if self.count_unconsolidated() < min_items:
+            return {"ok": True, "consolidated": False, "reason": "not enough new memories"}
+        return self.consolidate(limit=max(min_items, 8))
+
+    def consolidate(self, limit: int = 8) -> dict:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM memories
+                WHERE consolidated = 0
+                ORDER BY importance DESC, created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            memories = [dict(row) for row in rows]
+            if len(memories) < 2:
+                return {"ok": True, "consolidated": False, "reason": "not enough memories"}
+            source_ids = [int(memory["id"]) for memory in memories]
+            connections = _memory_connections(memories)
+            summary = _consolidation_summary(memories)
+            insight = _consolidation_insight(memories, connections)
+            now = time.time()
+            conn.execute(
+                """
+                INSERT INTO consolidations(source_ids, summary, insight, connections, created_at)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (json.dumps(source_ids), summary, insight, json.dumps(connections), now),
+            )
+            for connection in connections:
+                for current, linked in [(connection["from_id"], connection["to_id"]), (connection["to_id"], connection["from_id"])]:
+                    row = conn.execute("SELECT connections FROM memories WHERE id=?", (current,)).fetchone()
+                    existing = _safe_json(row["connections"] if row else "[]", [])
+                    existing.append({"linked_to": linked, "relationship": connection["relationship"]})
+                    conn.execute("UPDATE memories SET connections=? WHERE id=?", (json.dumps(existing), current))
+            conn.execute(
+                f"UPDATE memories SET consolidated = 1 WHERE id IN ({','.join('?' for _ in source_ids)})",
+                source_ids,
+            )
+        return {"ok": True, "consolidated": True, "source_ids": source_ids, "summary": summary, "insight": insight, "connections": connections}
+
     def forget(self, memory_id: int) -> bool:
         with self.connection() as conn:
             cursor = conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
@@ -182,9 +293,24 @@ class MemoryStore:
         if not self.config.auto_remember:
             return
         lowered = message.lower()
-        markers = ["remember ", "my name is ", "i prefer ", "i like ", "i live in "]
-        if any(marker in lowered for marker in markers):
-            self.remember(f"User said: {message}\nAssistant replied: {reply}", tags="conversation,user", source="chat")
+        markers = [
+            "remember ",
+            "my name is ",
+            "call me ",
+            "i prefer ",
+            "i like ",
+            "i live in ",
+            "i use ",
+            "my phone ",
+            "my model ",
+            "nermana should ",
+            "nermana needs ",
+            "fix ",
+        ]
+        if not any(marker in lowered for marker in markers):
+            return
+        content = f"User said: {message}\nAssistant replied: {reply[:600]}"
+        self.remember(content, tags="conversation,user,auto", source="chat")
 
     def _trim_session(self, conn: sqlite3.Connection, session_id: str) -> None:
         keep = max(20, int(self.config.retain_messages))
@@ -197,3 +323,143 @@ class MemoryStore:
             """,
             (session_id, session_id, keep),
         )
+
+    def _structure_memory(self, content: str, tags: str, source: str) -> dict:
+        text = " ".join(content.split())
+        return {
+            "summary": _summarize_text(text),
+            "entities": _extract_entities(text),
+            "topics": _extract_topics(" ".join([text, tags, source])),
+            "importance": _importance_score(text, tags),
+        }
+
+
+STOPWORDS = {
+    "about",
+    "after",
+    "again",
+    "assistant",
+    "because",
+    "before",
+    "could",
+    "from",
+    "have",
+    "into",
+    "just",
+    "like",
+    "more",
+    "nermana",
+    "reply",
+    "said",
+    "should",
+    "that",
+    "their",
+    "there",
+    "this",
+    "user",
+    "with",
+    "would",
+}
+
+
+def _summarize_text(text: str, limit: int = 220) -> str:
+    if len(text) <= limit:
+        return text
+    sentence = re.split(r"(?<=[.!?])\s+", text)[0]
+    if 20 <= len(sentence) <= limit:
+        return sentence
+    return text[: limit - 1].rstrip() + "."
+
+
+def _extract_entities(text: str) -> list[str]:
+    candidates = re.findall(r"\b(?:[A-Z][A-Za-z0-9_.-]+(?:\s+[A-Z][A-Za-z0-9_.-]+){0,3}|[A-Z0-9]{2,})\b", text)
+    seen: set[str] = set()
+    entities: list[str] = []
+    for item in candidates:
+        clean = item.strip(" ,.")
+        if len(clean) < 2 or clean.lower() in STOPWORDS or clean in seen:
+            continue
+        seen.add(clean)
+        entities.append(clean)
+        if len(entities) >= 8:
+            break
+    return entities
+
+
+def _extract_topics(text: str) -> list[str]:
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{3,}", text.lower())
+    counts: dict[str, int] = {}
+    for word in words:
+        if word in STOPWORDS:
+            continue
+        counts[word] = counts.get(word, 0) + 1
+    return [word for word, _count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:6]]
+
+
+def _importance_score(text: str, tags: str) -> float:
+    lowered = f"{text} {tags}".lower()
+    score = 0.45
+    if any(word in lowered for word in ["prefer", "remember", "important", "always", "never", "name is", "live in"]):
+        score += 0.25
+    if any(word in lowered for word in ["nermana", "model", "termux", "telegram", "search", "weather"]):
+        score += 0.15
+    if len(text) > 300:
+        score += 0.1
+    return min(1.0, round(score, 2))
+
+
+def _json_list(value: Iterable[str] | str) -> str:
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return json.dumps([str(item) for item in parsed])
+        except json.JSONDecodeError:
+            return json.dumps([part.strip() for part in value.split(",") if part.strip()])
+    return json.dumps([str(item) for item in value])
+
+
+def _safe_json(value: str, fallback):
+    try:
+        return json.loads(value or "")
+    except (json.JSONDecodeError, TypeError):
+        return fallback
+
+
+def _memory_connections(memories: list[dict]) -> list[dict]:
+    connections: list[dict] = []
+    for index, left in enumerate(memories):
+        left_topics = set(_safe_json(left.get("topics", "[]"), []))
+        left_entities = set(_safe_json(left.get("entities", "[]"), []))
+        for right in memories[index + 1 :]:
+            overlap = left_topics.intersection(_safe_json(right.get("topics", "[]"), []))
+            entity_overlap = left_entities.intersection(_safe_json(right.get("entities", "[]"), []))
+            if not overlap and not entity_overlap:
+                continue
+            shared = sorted(overlap or entity_overlap)
+            connections.append(
+                {
+                    "from_id": int(left["id"]),
+                    "to_id": int(right["id"]),
+                    "relationship": f"shared {', '.join(shared[:3])}",
+                }
+            )
+            if len(connections) >= 12:
+                return connections
+    return connections
+
+
+def _consolidation_summary(memories: list[dict]) -> str:
+    summaries = [memory.get("summary") or _summarize_text(memory.get("content", "")) for memory in memories[:5]]
+    return " | ".join(summary for summary in summaries if summary)[:700]
+
+
+def _consolidation_insight(memories: list[dict], connections: list[dict]) -> str:
+    topics: dict[str, int] = {}
+    for memory in memories:
+        for topic in _safe_json(memory.get("topics", "[]"), []):
+            topics[topic] = topics.get(topic, 0) + 1
+    top = [topic for topic, _count in sorted(topics.items(), key=lambda item: (-item[1], item[0]))[:4]]
+    if connections:
+        return f"Repeated pattern across memory: {', '.join(top) or 'related user priorities'}; {len(connections)} links were found."
+    return f"Recent memories mostly cluster around: {', '.join(top) or 'general user context'}."

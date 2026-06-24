@@ -16,6 +16,8 @@ class StartupManager:
         self.agent = AgentCore(load_config())
         self.web_host, self.web_port = self._server_binding()
         self.telegram_thread: threading.Thread | None = None
+        self.memory_thread: threading.Thread | None = None
+        self.stop_event = threading.Event()
         self.model_started = False
 
     def _server_binding(self) -> tuple[str, int]:
@@ -32,6 +34,7 @@ class StartupManager:
     def start(self) -> None:
         self._select_first_model_if_needed()
         self._start_model_if_available()
+        self._start_memory_if_available()
         self._start_telegram_if_available()
         self._serve_web()
 
@@ -70,6 +73,26 @@ class StartupManager:
         self.telegram_thread.start()
         print("telegram: polling")
 
+    def _start_memory_if_available(self) -> None:
+        cfg = self.agent.config.memory
+        if not cfg.auto_remember:
+            print("memory: auto memory disabled")
+            return
+        self.memory_thread = threading.Thread(target=self._memory_loop, name="nermana-memory", daemon=True)
+        self.memory_thread.start()
+        print("memory: always-on consolidation")
+
+    def _memory_loop(self) -> None:
+        cfg = self.agent.config.memory
+        interval = max(60.0, float(cfg.consolidate_every_seconds))
+        while not self.stop_event.wait(interval):
+            try:
+                result = self.agent.memory.consolidate_due(min_items=max(2, int(cfg.min_consolidate_items)))
+                if result.get("consolidated"):
+                    print(f"memory: consolidated {len(result.get('source_ids', []))} memories")
+            except Exception as exc:
+                print(f"memory: consolidation error: {exc}")
+
     def _serve_web(self) -> None:
         host = self.web_host
         port = self.web_port
@@ -91,6 +114,7 @@ class StartupManager:
         signal.signal(signal.SIGTERM, handler)
 
     def shutdown(self) -> None:
+        self.stop_event.set()
         if self.model_started:
             self.agent.models.stop_server()
 
