@@ -709,9 +709,14 @@ progress::-moz-progress-bar {
 }
 
 .list,
-.table {
+.table,
+.result-panel {
   display: grid;
   gap: 9px;
+}
+
+.result-panel {
+  margin-top: 12px;
 }
 
 .preset-list {
@@ -765,11 +770,6 @@ pre {
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
   font-size: 13px;
   line-height: 1.45;
-}
-
-#settingsJson {
-  min-height: 60vh;
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
 }
 
 .toast-stack {

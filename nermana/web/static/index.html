@@ -148,8 +148,8 @@
             <input name="message" placeholder="Model test prompt" />
             <button>Test</button>
           </form>
-          <pre id="downloadOutput"></pre>
-          <pre id="modelOutput"></pre>
+          <div id="downloadOutput" class="result-panel"></div>
+          <div id="modelOutput" class="result-panel"></div>
         </section>
 
         <section id="tools" class="page">
@@ -170,7 +170,7 @@
             <textarea name="payload" spellcheck="false">{}</textarea>
             <button>Run Tool</button>
           </form>
-          <pre id="toolOutput"></pre>
+          <div id="toolOutput" class="result-panel"></div>
         </section>
 
         <section id="memory" class="page">
@@ -198,16 +198,17 @@
             <button name="action" value="list">List</button>
             <button name="action" value="index">Index</button>
           </form>
-          <pre id="fileOutput"></pre>
+          <div id="fileOutput" class="result-panel"></div>
         </section>
 
         <section id="providers" class="page">
           <form id="providersForm" class="grid-form">
             <label>Search provider
               <select name="search.provider">
+                <option value="auto">Auto</option>
                 <option value="duckduckgo">DuckDuckGo</option>
                 <option value="searxng">SearXNG</option>
-                <option value="auto">Auto</option>
+                <option value="wikipedia">Wikipedia</option>
               </select>
             </label>
             <label>SearXNG URL <input name="search.searxng_url" placeholder="http://127.0.0.1:8888" /></label>
@@ -228,7 +229,7 @@
             <input name="query" placeholder="Test web search" />
             <button>Search</button>
           </form>
-          <pre id="searchOutput"></pre>
+          <div id="searchOutput" class="result-panel"></div>
         </section>
 
         <section id="phone" class="page">
@@ -269,7 +270,7 @@
             </select>
             <button class="primary-action">Run Phone Action</button>
           </form>
-          <pre id="phoneOutput"></pre>
+          <div id="phoneOutput" class="result-panel"></div>
         </section>
 
         <section id="telegram" class="page">
@@ -280,11 +281,11 @@
             <button class="primary-action">Save Telegram</button>
           </form>
           <button id="telegramPoll">Poll Once</button>
-          <pre id="telegramOutput"></pre>
+          <div id="telegramOutput" class="result-panel"></div>
         </section>
 
         <section id="logs" class="page">
-          <pre id="logsOutput"></pre>
+          <div id="logsOutput" class="dashboard-layout"></div>
         </section>
 
         <section id="settings" class="page">
@@ -293,12 +294,27 @@
             <button id="updateButton" class="primary-action">Pull Latest Push</button>
           </div>
           <div id="updateStatus" class="setup-panel"></div>
-          <form id="settingsForm" class="stack-form">
-            <textarea id="settingsJson" spellcheck="false"></textarea>
-            <button class="primary-action">Save JSON</button>
+          <form id="settingsForm" class="grid-form">
+            <label>Web host <input name="server.host" /></label>
+            <label>Web port <input name="server.port" type="number" min="1" max="65535" /></label>
+            <label>Public URL <input name="server.public_url" placeholder="optional tunnel URL" /></label>
+            <label>Auto-start model <input name="model.auto_start_server" type="checkbox" /></label>
+            <label>Auto memory <input name="memory.auto_remember" type="checkbox" /></label>
+            <label>Retain messages <input name="memory.retain_messages" type="number" min="20" /></label>
+            <label>Consolidate every seconds <input name="memory.consolidate_every_seconds" type="number" min="60" step="60" /></label>
+            <label>Minimum memories to consolidate <input name="memory.min_consolidate_items" type="number" min="2" /></label>
+            <label>Autonomy
+              <select name="safety.autonomy">
+                <option value="read_only">read_only</option>
+                <option value="power_user">power_user</option>
+              </select>
+            </label>
+            <label>Confirm power tools <input name="safety.require_confirmation_for_power" type="checkbox" /></label>
+            <button class="primary-action">Save Settings</button>
           </form>
-          <pre id="updateOutput"></pre>
-          <pre id="settingsOutput"></pre>
+          <div id="settingsCards" class="metric-grid"></div>
+          <div id="updateOutput" class="result-panel"></div>
+          <div id="settingsOutput" class="result-panel"></div>
         </section>
       </main>
     </div>

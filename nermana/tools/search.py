@@ -17,12 +17,12 @@ def register_search_tools(registry: ToolRegistry, config: AppConfig) -> None:
         if not config.search.enabled:
             return False, "search disabled"
         provider = config.search.provider.lower()
-        if provider in {"auto", "duckduckgo"}:
-            return True, "configured"
+        if provider in {"auto", "duckduckgo", "wikipedia"}:
+            return True, "configured with offline-safe fallbacks"
         if provider == "searxng" and config.search.searxng_url:
             return True, "configured"
         if provider == "searxng":
-            return True, "using DuckDuckGo fallback; set a SearXNG URL for SearXNG"
+            return True, "using DuckDuckGo/Wikipedia fallback; set a SearXNG URL for SearXNG"
         return False, f"unsupported provider: {config.search.provider}"
 
     def web_search(payload: dict) -> dict:
@@ -35,19 +35,26 @@ def register_search_tools(registry: ToolRegistry, config: AppConfig) -> None:
             result = _search_searxng(config, query, page)
             if result.get("ok"):
                 return result
-            fallback = _search_duckduckgo(config, query)
+            fallback = _search_no_key_chain(config, query)
             fallback["fallback_error"] = result.get("error", "")
             return fallback
         if provider == "searxng" and config.search.searxng_url:
-            return _search_searxng(config, query, page)
+            result = _search_searxng(config, query, page)
+            if result.get("ok") and result.get("results"):
+                return result
+            fallback = _search_no_key_chain(config, query)
+            fallback["fallback_error"] = result.get("error", "SearXNG returned no results")
+            return fallback
         if provider in {"auto", "duckduckgo", "searxng"}:
-            return _search_duckduckgo(config, query)
+            return _search_no_key_chain(config, query)
+        if provider == "wikipedia":
+            return _search_wikipedia(config, query)
         return {"ok": False, "error": f"unsupported provider: {config.search.provider}"}
 
     registry.register(
         Tool(
             name="web_search",
-            description="Search the web through DuckDuckGo or a configured SearXNG JSON endpoint.",
+            description="Search through SearXNG, DuckDuckGo, and Wikipedia fallbacks.",
             provider=config.search.provider,
             input_schema={"type": "object", "properties": {"query": {"type": "string"}, "page": {"type": "integer"}}},
             output_schema={"type": "object", "properties": {"results": {"type": "array"}}},
@@ -85,6 +92,18 @@ def _search_searxng(config: AppConfig, query: str, page: int) -> dict:
             }
         )
     return {"ok": True, "provider": "searxng", "query": query, "results": results}
+
+
+def _search_no_key_chain(config: AppConfig, query: str) -> dict:
+    duck = _search_duckduckgo(config, query)
+    if duck.get("ok") and duck.get("results"):
+        return duck
+    wiki = _search_wikipedia(config, query)
+    if wiki.get("ok") and wiki.get("results"):
+        wiki["fallback_error"] = duck.get("error", "DuckDuckGo returned no results")
+        return wiki
+    errors = [duck.get("error", "DuckDuckGo returned no results"), wiki.get("error", "Wikipedia returned no results")]
+    return {"ok": False, "provider": "auto", "query": query, "results": [], "error": "search unavailable: " + "; ".join(errors)}
 
 
 def _search_duckduckgo(config: AppConfig, query: str) -> dict:
@@ -160,6 +179,36 @@ def _search_duckduckgo_instant(config: AppConfig, query: str) -> dict:
             break
         results.append(topic)
     return {"ok": True, "provider": "duckduckgo-instant", "query": query, "results": results[: config.search.max_results]}
+
+
+def _search_wikipedia(config: AppConfig, query: str) -> dict:
+    response = get_json(
+        "https://en.wikipedia.org/w/api.php",
+        {
+            "action": "query",
+            "format": "json",
+            "generator": "search",
+            "gsrsearch": query,
+            "gsrlimit": config.search.max_results,
+            "prop": "extracts|info",
+            "exintro": 1,
+            "explaintext": 1,
+            "inprop": "url",
+        },
+        timeout=config.search.timeout_seconds,
+        headers={"User-Agent": "Nermana-Termux/0.1"},
+    )
+    if not response.ok:
+        return {"ok": False, "provider": "wikipedia", "query": query, "results": [], "error": f"wikipedia unavailable: {response.error}"}
+    pages = response.data.get("query", {}).get("pages", {})
+    results = []
+    for page in pages.values():
+        title = page.get("title", "")
+        extract = " ".join(str(page.get("extract", "")).split())
+        url = page.get("fullurl") or f"https://en.wikipedia.org/wiki/{urllib.parse.quote(title.replace(' ', '_'))}"
+        if title:
+            results.append({"title": title, "url": url, "content": extract, "engine": "wikipedia"})
+    return {"ok": True, "provider": "wikipedia", "query": query, "results": results[: config.search.max_results]}
 
 
 def _instant_topics(items: list) -> list[dict]:

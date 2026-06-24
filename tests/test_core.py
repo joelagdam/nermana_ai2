@@ -191,6 +191,37 @@ class ToolTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["results"][0]["url"], "https://example.com/lite")
 
+    def test_search_falls_back_to_wikipedia_when_duckduckgo_empty(self) -> None:
+        cfg = AppConfig(search=SearchConfig(enabled=True, provider="auto", max_results=3))
+        registry = ToolRegistry(cfg)
+        register_search_tools(registry, cfg)
+        wiki = HttpResponse(
+            True,
+            200,
+            {
+                "query": {
+                    "pages": {
+                        "1": {
+                            "title": "Nermana",
+                            "extract": "Nermana is a test result.",
+                            "fullurl": "https://example.com/wiki/Nermana",
+                        }
+                    }
+                }
+            },
+        )
+        with patch("urllib.request.urlopen", side_effect=OSError("blocked")), patch(
+            "nermana.tools.search.get_json",
+            side_effect=[
+                HttpResponse(True, 200, {"RelatedTopics": []}),
+                wiki,
+            ],
+        ):
+            result = registry.run("web_search", {"query": "nermana"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["provider"], "wikipedia")
+        self.assertEqual(result["results"][0]["title"], "Nermana")
+
     def test_file_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -261,6 +292,20 @@ class AgentTests(unittest.TestCase):
             self.assertIn("rain", text.lower())
             self.assertNotIn("{", text)
 
+    def test_direct_weather_passes_tool_context_to_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            weather = {
+                "ok": True,
+                "tool": "current_weather",
+                "location": "Tagum City",
+                "weather": {"current": {"temperature_2m": 30, "weather_code": 1}, "current_units": {"temperature_2m": "C"}},
+            }
+            with patch.object(agent.tools, "run", return_value=weather), patch.object(agent.models, "chat", return_value={"ok": True, "content": "Tagum City is warm and mostly clear."}):
+                result = agent.chat("/weather Tagum City", session_id="weather-model")
+            self.assertEqual(result["reply"], "Tagum City is warm and mostly clear.")
+
     def test_agent_offline_core_has_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
@@ -269,6 +314,15 @@ class AgentTests(unittest.TestCase):
                 result = agent.chat("who are you?", session_id="identity")
             self.assertIn("Nermana", result["reply"])
             self.assertIn("local-first", result["reply"])
+
+    def test_agent_initiates_learning_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            with patch.object(agent.models, "server_health", return_value={"ok": False}):
+                result = agent.initiative_message("fresh")
+            self.assertTrue(result["message"])
+            self.assertIn("Teach me", result["message"])
 
 
 class TelegramTests(unittest.TestCase):

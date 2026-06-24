@@ -34,7 +34,10 @@ class AgentCore:
 
         pending_result = self._maybe_run_pending_action(message, session_id)
         if pending_result is not None:
-            answer = self._tool_result_to_text(pending_result)
+            if pending_result.get("ok") and pending_result.get("tool") and pending_result.get("tool") != "memory":
+                answer = self._answer_from_tool_context(session_id, "Answer the user's confirmed tool request.", pending_result)
+            else:
+                answer = self._tool_result_to_text(pending_result)
             return self._finish(session_id, message, answer, [pending_result])
 
         direct = self._direct_tool(message)
@@ -89,6 +92,15 @@ class AgentCore:
         if not second.get("ok"):
             second["restart"] = restart
         return second
+
+    def _answer_from_tool_context(self, session_id: str, instruction: str, tool_result: dict[str, Any]) -> str:
+        tool_context = self._tool_result_to_text(tool_result)
+        memories = self.memory.search(tool_context, limit=3)
+        messages = self._build_messages(session_id, instruction, memories, tool_context)
+        model_reply = self._chat_model(messages)
+        if model_reply.get("ok"):
+            return model_reply["content"].strip()
+        return tool_context
 
     def _finish(self, session_id: str, message: str, answer: str, tool_results: list[dict[str, Any]] | None = None, **extra: Any) -> dict[str, Any]:
         self.memory.add_message(session_id, "assistant", answer)
@@ -149,18 +161,18 @@ class AgentCore:
             if command == "weather":
                 return {"tool": "current_weather", "payload": {"location": rest}, "tool_only": False}
             if command == "read":
-                return {"tool": "read_file", "payload": {"path": rest}, "tool_only": True}
+                return {"tool": "read_file", "payload": {"path": rest}, "tool_only": False}
             if command == "index":
-                return {"tool": "index_file", "payload": {"path": rest}, "tool_only": True}
+                return {"tool": "index_file", "payload": {"path": rest}, "tool_only": False}
             if command == "image":
                 return {"tool": "generate_image", "payload": {"prompt": rest}, "tool_only": True}
             if command == "vision":
                 parts = rest.split(" ", 1)
-                return {"tool": "vision_analyze", "payload": {"path": parts[0], "question": parts[1] if len(parts) > 1 else ""}, "tool_only": True}
+                return {"tool": "vision_analyze", "payload": {"path": parts[0], "question": parts[1] if len(parts) > 1 else ""}, "tool_only": False}
             if command == "phone":
-                return {"tool": "phone_status", "payload": {}, "tool_only": True}
+                return {"tool": "phone_status", "payload": {}, "tool_only": False}
         if lower.startswith("read file "):
-            return {"tool": "read_file", "payload": {"path": message[10:].strip()}, "tool_only": True}
+            return {"tool": "read_file", "payload": {"path": message[10:].strip()}, "tool_only": False}
         return None
 
     def _suggest_tool(self, message: str) -> dict[str, Any] | None:
@@ -347,6 +359,25 @@ class AgentCore:
             "tools": self.tools.list_metadata(),
             "sessions": self.memory.list_sessions(),
         }
+
+    def initiative_message(self, session_id: str = "web") -> dict[str, Any]:
+        history = self.memory.get_messages(session_id, limit=2)
+        memory_count = self.memory.count_memories()
+        insights = self.memory.list_consolidations(limit=1)
+        model_ok = self.models.server_health().get("ok")
+        if not history:
+            if memory_count:
+                content = (
+                    f"I am online in core memory mode. I have {memory_count} saved memory item(s)"
+                    f"{' and one active insight' if insights else ''}. Give me a task, or teach me a preference I should keep."
+                )
+            else:
+                content = "I am awake. Teach me one thing I should remember about how you want Nermana to behave, or give me a task."
+        elif not model_ok:
+            content = "Local model is not responding. I can still learn, search/weather when online, read allowed files, and help start the GGUF model."
+        else:
+            return {"ok": True, "message": "", "reason": "no initiative needed"}
+        return {"ok": True, "message": content, "reason": "learning-initiation"}
 
     def settings_snapshot(self) -> dict[str, Any]:
         from .config import public_config

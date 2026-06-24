@@ -237,6 +237,8 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._json(self.server_state.dashboard_snapshot())
         elif path == "/api/status":
             self._json(self._status())
+        elif path == "/api/proactive":
+            self._json(self.agent.initiative_message(query.get("session_id", ["web"])[0]))
         elif path == "/api/settings":
             self._json(self.agent.settings_snapshot())
         elif path == "/api/models":

@@ -1,6 +1,7 @@
 let config = {};
 let statusCache = {};
 let dashboardCache = {};
+let chatInitiated = false;
 
 const pages = Array.from(document.querySelectorAll(".page"));
 const navButtons = Array.from(document.querySelectorAll("#nav button"));
@@ -94,8 +95,93 @@ function showToast(title, message, type = "success", timeout = 7000) {
   setTimeout(() => toast.remove(), timeout);
 }
 
-function output(nodeId, value) {
-  document.getElementById(nodeId).textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+function renderResult(nodeId, value) {
+  const node = document.getElementById(nodeId);
+  if (!node) return;
+  node.innerHTML = "";
+  if (typeof value === "string") {
+    node.appendChild(activityItem(value || "No output", ""));
+    return;
+  }
+  if (!value || typeof value !== "object") {
+    node.appendChild(activityItem("No output", ""));
+    return;
+  }
+  if (value.ok === false) {
+    node.appendChild(activityItem("Action failed", value.error || value.message || "Unknown error"));
+    return;
+  }
+  if (value.summary) {
+    node.appendChild(activityItem("Summary", value.summary));
+  }
+  if (value.reply) {
+    node.appendChild(activityItem("Reply", value.reply));
+  }
+  if (value.results) {
+    renderSearchCards(node, value);
+    return;
+  }
+  if (value.weather) {
+    node.appendChild(activityItem("Weather", weatherText(value)));
+    return;
+  }
+  if (value.content) {
+    node.appendChild(activityItem("Content", value.content));
+    return;
+  }
+  Object.entries(value)
+    .filter(([key]) => !["ok", "raw", "data"].includes(key))
+    .slice(0, 12)
+    .forEach(([key, item]) => {
+      node.appendChild(activityItem(labelize(key), simpleValue(item)));
+    });
+}
+
+function renderSearchCards(node, value) {
+  const results = value.results || [];
+  node.appendChild(activityItem("Search", `${results.length} result(s) from ${value.provider || "provider"} for ${value.query || "query"}`));
+  if (value.fallback_error) {
+    node.appendChild(activityItem("Fallback used", value.fallback_error));
+  }
+  if (!results.length) {
+    node.appendChild(activityItem("No results", value.error || "Try Auto provider or configure SearXNG."));
+    return;
+  }
+  results.forEach((item, index) => {
+    const title = `${index + 1}. ${item.title || "Untitled"}`;
+    const detail = [item.content, item.url ? `Source: ${item.url}` : ""].filter(Boolean).join("\n");
+    node.appendChild(activityItem(title, detail));
+  });
+}
+
+function weatherText(value) {
+  const current = value.weather?.current || {};
+  const units = value.weather?.current_units || {};
+  const daily = value.weather?.daily || {};
+  const parts = [`${value.location || "Weather"} is available.`];
+  if (current.temperature_2m !== undefined) {
+    parts.push(`Now ${current.temperature_2m}${units.temperature_2m || ""}`);
+  }
+  if (current.apparent_temperature !== undefined) {
+    parts.push(`feels like ${current.apparent_temperature}${units.temperature_2m || ""}`);
+  }
+  if (current.relative_humidity_2m !== undefined) {
+    parts.push(`humidity ${current.relative_humidity_2m}%`);
+  }
+  if ((daily.time || []).length) {
+    parts.push(`Forecast starts ${daily.time[0]}.`);
+  }
+  return parts.join(", ");
+}
+
+function simpleValue(value) {
+  if (Array.isArray(value)) return value.map(simpleValue).join(", ");
+  if (value && typeof value === "object") return Object.entries(value).map(([key, item]) => `${labelize(key)}: ${simpleValue(item)}`).join(" | ");
+  return String(value ?? "");
+}
+
+function labelize(key) {
+  return String(key).replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function delay(ms) {
@@ -116,7 +202,7 @@ async function refreshAll() {
   await renderMemory();
   await renderLogs();
   await renderUpdateStatus(false);
-  document.getElementById("settingsJson").value = JSON.stringify(config, null, 2);
+  await maybeInitiateChat();
 }
 
 function summarizeStatus(status) {
@@ -170,7 +256,9 @@ function fillForms() {
   setDottedForm("toolDecisionSettings", config);
   setDottedForm("phoneSettings", config);
   setDottedForm("telegramSettings", config);
+  setDottedForm("settingsForm", config);
   document.querySelector("#telegramSettings [name='telegram.allowed_user_ids']").value = (config.telegram.allowed_user_ids || []).join(",");
+  renderSettingsCards();
 }
 
 function setFormValues(formId, values) {
@@ -227,7 +315,6 @@ function coerce(value) {
 
 async function savePatch(patch, message = "Saved") {
   config = await api("/api/settings", { method: "POST", body: JSON.stringify(patch) });
-  document.getElementById("settingsJson").value = JSON.stringify(config, null, 2);
   await refreshAll();
   return { ok: true, message };
 }
@@ -419,6 +506,30 @@ function addMessage(role, text) {
   log.scrollTop = log.scrollHeight;
 }
 
+async function maybeInitiateChat() {
+  if (chatInitiated || document.getElementById("chatLog").children.length) return;
+  chatInitiated = true;
+  try {
+    const result = await api("/api/proactive?session_id=web");
+    if (result.message) addMessage("assistant", result.message);
+  } catch (error) {
+    showToast("Chat", String(error.message || error), "error");
+  }
+}
+
+function renderSettingsCards() {
+  const node = document.getElementById("settingsCards");
+  if (!node) return;
+  node.innerHTML = "";
+  node.append(
+    metric("Web", `${config.server.host}:${config.server.port}`, config.server.public_url || "local only", "good"),
+    metric("Model", config.model.auto_start_server ? "auto-start" : "manual", config.model.active_model || "no active model", config.model.auto_start_server ? "good" : ""),
+    metric("Memory", config.memory.auto_remember ? "learning" : "manual", `${config.memory.retain_messages} retained`, config.memory.auto_remember ? "good" : "warn"),
+    metric("Consolidation", `${config.memory.min_consolidate_items}+`, `every ${config.memory.consolidate_every_seconds}s`, "good"),
+    metric("Autonomy", config.safety.autonomy, config.safety.require_confirmation_for_power ? "power confirms" : "power allowed", config.safety.require_confirmation_for_power ? "warn" : "good")
+  );
+}
+
 async function renderModels() {
   const data = await api("/api/models");
   renderLlamaStatus(data.llama_server);
@@ -435,7 +546,7 @@ async function renderModels() {
     select.disabled = !model.loadable;
     list.appendChild(makeRow(model.name, `${model.size_mb} MB ${model.loadable ? "" : "(.guff typo)"}`, [badge(model.active ? "active" : "idle", !model.active), select]));
   });
-  output("modelOutput", data.health);
+  renderResult("modelOutput", data.health);
 }
 
 async function renderPresets() {
@@ -454,7 +565,7 @@ async function renderPresets() {
   } catch (error) {
     const message = String(error.message || error);
     list.appendChild(makeRow("Preset models unavailable", message));
-    output("downloadOutput", { ok: false, error: message });
+    renderResult("downloadOutput", { ok: false, error: message });
     return;
   }
   const presets = Array.isArray(data.presets) ? data.presets : [];
@@ -475,24 +586,24 @@ async function renderPresets() {
 
 async function downloadModel(payload) {
   renderDownloadProgress({ state: "queued", message: "Queued", bytes_read: 0, total_bytes: 0, percent: 0 });
-  output("downloadOutput", "Download queued.");
+  renderResult("downloadOutput", "Download queued.");
   const started = await runAction(
     "Model download",
     () => api("/api/models/download/start", { method: "POST", body: JSON.stringify(payload) }),
     "Download started"
   );
   if (!started.ok) {
-    output("downloadOutput", started);
+    renderResult("downloadOutput", started);
     return started;
   }
   let job = started.job;
   renderDownloadProgress(job);
-  output("downloadOutput", job);
+  renderResult("downloadOutput", job);
   while (job && !["complete", "error"].includes(job.state)) {
     await delay(1000);
     job = await api(`/api/models/downloads/${started.job_id}`);
     renderDownloadProgress(job);
-    output("downloadOutput", job);
+    renderResult("downloadOutput", job);
   }
   if (job.state === "complete") {
     showToast("Model download", "Download complete", "success");
@@ -547,11 +658,11 @@ function renderLlamaStatus(status) {
 document.getElementById("scanModels").addEventListener("click", () => runAction("Models", renderModels, "Models scanned"));
 document.getElementById("restartModel").addEventListener("click", async () => {
   const result = await runAction("Model server", () => api("/api/models/restart", { method: "POST" }), "Restart requested");
-  output("modelOutput", result);
+  renderResult("modelOutput", result);
 });
 document.getElementById("detectLlama").addEventListener("click", async () => {
   const result = await runAction("llama-server", () => api("/api/models/llama/use-detected", { method: "POST" }), "Path saved");
-  output("modelOutput", result);
+  renderResult("modelOutput", result);
   await refreshAll();
 });
 document.getElementById("modelDownload").addEventListener("submit", async (event) => {
@@ -592,7 +703,7 @@ document.getElementById("modelSettings").addEventListener("submit", async (event
 document.getElementById("modelTest").addEventListener("submit", async (event) => {
   event.preventDefault();
   const result = await runAction("Model test", () => api("/api/models/test", { method: "POST", body: JSON.stringify({ message: event.currentTarget.message.value }) }), "Test complete");
-  output("modelOutput", result);
+  renderResult("modelOutput", result);
 });
 
 async function renderTools() {
@@ -625,7 +736,7 @@ document.getElementById("toolRun").addEventListener("submit", async (event) => {
     return;
   }
   const result = await runAction("Tool", () => api(`/api/tools/${form.tool.value}/run`, { method: "POST", body: JSON.stringify({ payload }) }), "Tool finished");
-  output("toolOutput", result);
+  renderResult("toolOutput", result);
 });
 
 document.getElementById("toolDecisionSettings").addEventListener("submit", async (event) => {
@@ -685,7 +796,7 @@ document.getElementById("fileRead").addEventListener("submit", async (event) => 
   const path = event.currentTarget.path.value;
   const tool = submitter?.value === "list" ? "list_files" : submitter?.value === "index" ? "index_file" : "read_file";
   const result = await runAction("Files", () => api(`/api/tools/${tool}/run`, { method: "POST", body: JSON.stringify({ payload: { path } }) }), "File action complete");
-  output("fileOutput", result);
+  renderResult("fileOutput", result);
 });
 
 document.getElementById("providersForm").addEventListener("submit", async (event) => {
@@ -701,7 +812,7 @@ document.getElementById("searchTest").addEventListener("submit", async (event) =
     () => api("/api/tools/web_search/run", { method: "POST", body: JSON.stringify({ payload: { query } }) }),
     "Search complete"
   );
-  output("searchOutput", result);
+  renderResult("searchOutput", result);
 });
 document.getElementById("phoneSettings").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -710,7 +821,7 @@ document.getElementById("phoneSettings").addEventListener("submit", async (event
 document.querySelectorAll("[data-phone-tool]").forEach((item) => {
   item.addEventListener("click", async () => {
     const result = await runAction("Phone", () => api(`/api/tools/${item.dataset.phoneTool}/run`, { method: "POST", body: JSON.stringify({ payload: {} }) }), "Phone action complete");
-    output("phoneOutput", result);
+    renderResult("phoneOutput", result);
   });
 });
 document.getElementById("phoneAction").addEventListener("submit", async (event) => {
@@ -728,7 +839,7 @@ document.getElementById("phoneAction").addEventListener("submit", async (event) 
     mode: form.mode.value,
   };
   const result = await runAction("Phone", () => api(`/api/tools/${form.tool.value}/run`, { method: "POST", body: JSON.stringify({ payload }) }), "Phone action complete");
-  output("phoneOutput", result);
+  renderResult("phoneOutput", result);
 });
 
 document.getElementById("telegramSettings").addEventListener("submit", async (event) => {
@@ -742,11 +853,34 @@ document.getElementById("telegramSettings").addEventListener("submit", async (ev
 });
 document.getElementById("telegramPoll").addEventListener("click", async () => {
   const result = await runAction("Telegram", () => api("/api/telegram/poll_once", { method: "POST" }), "Poll complete");
-  output("telegramOutput", result);
+  renderResult("telegramOutput", result);
 });
 
 async function renderLogs() {
-  output("logsOutput", await api("/api/logs"));
+  renderLogsView(await api("/api/logs"));
+}
+
+function renderLogsView(data) {
+  const node = document.getElementById("logsOutput");
+  node.innerHTML = "";
+  const modelPanel = document.createElement("section");
+  modelPanel.className = "dashboard-panel";
+  modelPanel.appendChild(activityItem("Model health", data.model_health?.ok ? "Ready" : data.model_health?.error || "Unavailable"));
+  const sessionPanel = document.createElement("section");
+  sessionPanel.className = "dashboard-panel";
+  sessionPanel.appendChild(activityItem("Recent sessions", `${(data.recent_sessions || []).length} session(s)`));
+  (data.recent_sessions || []).slice(0, 6).forEach((session) => {
+    sessionPanel.appendChild(activityItem(session.title || session.id || "Session", `Updated ${formatTime(session.updated_at)}`));
+  });
+  const toolsPanel = document.createElement("section");
+  toolsPanel.className = "dashboard-panel";
+  const tools = data.tools || [];
+  const active = tools.filter((tool) => tool.enabled && tool.available).length;
+  toolsPanel.appendChild(activityItem("Tools", `${active}/${tools.length} available`));
+  tools.slice(0, 10).forEach((tool) => {
+    toolsPanel.appendChild(activityItem(tool.name, `${tool.available ? "Available" : "Unavailable"} | ${tool.details || tool.provider}`));
+  });
+  node.append(modelPanel, sessionPanel, toolsPanel);
 }
 
 async function renderUpdateStatus(refreshRemote = false) {
@@ -771,27 +905,21 @@ function renderUpdateStatusResult(result) {
 
 document.getElementById("settingsForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  let patch = {};
-  try {
-    patch = JSON.parse(document.getElementById("settingsJson").value);
-  } catch {
-    showToast("Settings", "JSON is invalid.", "error");
-    return;
-  }
+  const patch = patchFromDottedForm("settingsForm");
   const result = await runAction("Settings", () => savePatch(patch));
-  output("settingsOutput", result);
+  renderResult("settingsOutput", { ok: true, message: "Settings saved", ...result });
 });
 
 document.getElementById("checkUpdateButton").addEventListener("click", async () => {
   const result = await runAction("Update check", () => renderUpdateStatus(true), "Check complete");
   renderUpdateStatusResult(result);
-  output("updateOutput", result);
+  renderResult("updateOutput", result);
 });
 
 document.getElementById("updateButton").addEventListener("click", async () => {
   const result = await runAction("Update", () => api("/api/update", { method: "POST", body: JSON.stringify({}) }), "Update finished");
   renderUpdateStatusResult(result.status || result);
-  output("updateOutput", result);
+  renderResult("updateOutput", result);
 });
 
 refreshAll().catch((error) => {

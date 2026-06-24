@@ -62,7 +62,7 @@ class ModelConfig:
 @dataclass
 class SearchConfig:
     enabled: bool = True
-    provider: str = "duckduckgo"
+    provider: str = "auto"
     searxng_url: str = ""
     timeout_seconds: float = 8.0
     max_results: int = 5
