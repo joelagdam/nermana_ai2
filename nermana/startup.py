@@ -69,6 +69,10 @@ class StartupManager:
             print("telegram: disabled")
             return
         bot = TelegramBot(self.agent)
+        status = bot.status()
+        if not status.get("ok"):
+            print(f"telegram: {status.get('error', 'not ready')}")
+            return
         self.telegram_thread = threading.Thread(target=bot.run_forever, name="nermana-telegram", daemon=True)
         self.telegram_thread.start()
         print("telegram: polling")

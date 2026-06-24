@@ -246,6 +246,38 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(result["provider"], "wikipedia")
         self.assertEqual(result["results"][0]["title"], "Nermana")
 
+    def test_search_falls_back_to_hackernews_after_empty_providers(self) -> None:
+        cfg = AppConfig(search=SearchConfig(enabled=True, provider="auto", max_results=3))
+        registry = ToolRegistry(cfg)
+        register_search_tools(registry, cfg)
+        hn = HttpResponse(
+            True,
+            200,
+            {
+                "hits": [
+                    {
+                        "title": "Nermana search fallback",
+                        "url": "https://example.com/fallback",
+                        "points": 42,
+                        "num_comments": 3,
+                        "author": "kent",
+                    }
+                ]
+            },
+        )
+        with patch("urllib.request.urlopen", side_effect=OSError("blocked")), patch(
+            "nermana.tools.search.get_json",
+            side_effect=[
+                HttpResponse(True, 200, {"RelatedTopics": []}),
+                HttpResponse(True, 200, {"query": {"pages": {}}}),
+                hn,
+            ],
+        ):
+            result = registry.run("web_search", {"query": "nermana"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["provider"], "hackernews")
+        self.assertEqual(result["results"][0]["title"], "Nermana search fallback")
+
     def test_file_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -380,6 +412,53 @@ class TelegramTests(unittest.TestCase):
                 first = TelegramBot(agent).poll_once(timeout=1)
             self.assertEqual(first["offset"], 12)
             self.assertEqual(TelegramBot(agent).offset, 12)
+
+    def test_telegram_status_reports_invalid_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="bad-token", offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            with patch("nermana.telegram_bot.get_json", return_value=HttpResponse(False, 404, None, "HTTP Error 404: Not Found")):
+                result = TelegramBot(agent).status()
+        self.assertFalse(result["ok"])
+        self.assertIn("BotFather", result["error"])
+
+    def test_telegram_poll_clears_webhook_conflict_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            with patch(
+                "nermana.telegram_bot.get_json",
+                side_effect=[
+                    HttpResponse(False, 409, None, "Conflict: can't use getUpdates method while webhook is active"),
+                    HttpResponse(True, 200, {"ok": True, "result": []}),
+                ],
+            ), patch("nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True, "description": "Webhook was deleted"})) as post:
+                result = TelegramBot(agent).poll_once(timeout=1)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["processed"], 0)
+        self.assertTrue(post.called)
+
+    def test_telegram_drop_pending_updates_advances_offset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            with patch("nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})), patch(
+                "nermana.telegram_bot.get_json",
+                return_value=HttpResponse(True, 200, {"ok": True, "result": [{"update_id": 21}]}),
+            ):
+                result = TelegramBot(agent).reset_offset(drop_pending_updates=True)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["offset"], 22)
+            self.assertEqual(TelegramBot(agent).offset, 22)
 
 
 class StartupTests(unittest.TestCase):

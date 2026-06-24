@@ -231,9 +231,15 @@ class SimpleNermanaServer:
         if self.telegram_thread and self.telegram_thread.is_alive():
             return {"ok": True, "message": "Telegram polling already running."}
         bot = TelegramBot(self.agent)
+        status = bot.status()
+        if not status.get("ok"):
+            return status
+        clear = bot.delete_webhook(drop_pending_updates=False)
+        if not clear.get("ok"):
+            return clear
         self.telegram_thread = threading.Thread(target=bot.run_forever, name="nermana-telegram-web", daemon=True)
         self.telegram_thread.start()
-        return {"ok": True, "message": "Telegram polling started.", "offset": bot.offset}
+        return {"ok": True, "message": "Telegram polling started.", "offset": bot.offset, "bot": status.get("bot"), "webhook": clear}
 
 
 class NermanaHandler(BaseHTTPRequestHandler):
@@ -299,6 +305,11 @@ class NermanaHandler(BaseHTTPRequestHandler):
         elif path == "/api/update/status":
             refresh = query.get("refresh", ["0"])[0].lower() in {"1", "true", "yes"}
             self._json(update_status(fetch=refresh))
+        elif path == "/api/telegram/status":
+            try:
+                self._json(TelegramBot(self.agent).status())
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)})
         else:
             self._json({"ok": False, "error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -378,9 +389,14 @@ class NermanaHandler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": str(exc)})
         elif path == "/api/telegram/start":
             self._json(self.server_state.start_telegram())
+        elif path == "/api/telegram/clear_webhook":
+            try:
+                self._json(TelegramBot(self.agent).delete_webhook(drop_pending_updates=bool(body.get("drop_pending_updates", False))))
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)})
         elif path == "/api/telegram/reset_offset":
             try:
-                self._json(TelegramBot(self.agent).reset_offset())
+                self._json(TelegramBot(self.agent).reset_offset(drop_pending_updates=bool(body.get("drop_pending_updates", False))))
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)})
         elif path == "/api/update":

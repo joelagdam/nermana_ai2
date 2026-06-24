@@ -17,7 +17,7 @@ def register_search_tools(registry: ToolRegistry, config: AppConfig) -> None:
         if not config.search.enabled:
             return False, "search disabled"
         provider = config.search.provider.lower()
-        if provider in {"auto", "duckduckgo", "wikipedia"}:
+        if provider in {"auto", "duckduckgo", "wikipedia", "hackernews"}:
             return True, "configured with offline-safe fallbacks"
         if provider == "searxng" and config.search.searxng_url:
             return True, "configured"
@@ -33,10 +33,10 @@ def register_search_tools(registry: ToolRegistry, config: AppConfig) -> None:
         page = int(payload.get("page", 1))
         if provider == "auto" and config.search.searxng_url:
             result = _search_searxng(config, query, page)
-            if result.get("ok"):
+            if result.get("ok") and result.get("results"):
                 return result
             fallback = _search_no_key_chain(config, query)
-            fallback["fallback_error"] = result.get("error", "")
+            fallback["fallback_error"] = result.get("error", "SearXNG returned no results")
             return fallback
         if provider == "searxng" and config.search.searxng_url:
             result = _search_searxng(config, query, page)
@@ -49,12 +49,14 @@ def register_search_tools(registry: ToolRegistry, config: AppConfig) -> None:
             return _search_no_key_chain(config, query)
         if provider == "wikipedia":
             return _search_wikipedia(config, query)
+        if provider == "hackernews":
+            return _search_hackernews(config, query)
         return {"ok": False, "error": f"unsupported provider: {config.search.provider}"}
 
     registry.register(
         Tool(
             name="web_search",
-            description="Search through SearXNG, DuckDuckGo, and Wikipedia fallbacks.",
+            description="Search through SearXNG, DuckDuckGo, Wikipedia, and Hacker News fallbacks.",
             provider=config.search.provider,
             input_schema={"type": "object", "properties": {"query": {"type": "string"}, "page": {"type": "integer"}}},
             output_schema={"type": "object", "properties": {"results": {"type": "array"}}},
@@ -102,7 +104,20 @@ def _search_no_key_chain(config: AppConfig, query: str) -> dict:
     if wiki.get("ok") and wiki.get("results"):
         wiki["fallback_error"] = duck.get("error", "DuckDuckGo returned no results")
         return wiki
-    errors = [duck.get("error", "DuckDuckGo returned no results"), wiki.get("error", "Wikipedia returned no results")]
+    hn = _search_hackernews(config, query)
+    if hn.get("ok") and hn.get("results"):
+        hn["fallback_error"] = "; ".join(
+            [
+                duck.get("error", "DuckDuckGo returned no results"),
+                wiki.get("error", "Wikipedia returned no results"),
+            ]
+        )
+        return hn
+    errors = [
+        duck.get("error", "DuckDuckGo returned no results"),
+        wiki.get("error", "Wikipedia returned no results"),
+        hn.get("error", "Hacker News returned no results"),
+    ]
     return {"ok": False, "provider": "auto", "query": query, "results": [], "error": "search unavailable: " + "; ".join(errors)}
 
 
@@ -209,6 +224,35 @@ def _search_wikipedia(config: AppConfig, query: str) -> dict:
         if title:
             results.append({"title": title, "url": url, "content": extract, "engine": "wikipedia"})
     return {"ok": True, "provider": "wikipedia", "query": query, "results": results[: config.search.max_results]}
+
+
+def _search_hackernews(config: AppConfig, query: str) -> dict:
+    response = get_json(
+        "https://hn.algolia.com/api/v1/search",
+        {"query": query, "tags": "story", "hitsPerPage": config.search.max_results},
+        timeout=config.search.timeout_seconds,
+        headers={"User-Agent": "Nermana-Termux/0.1"},
+    )
+    if not response.ok:
+        return {"ok": False, "provider": "hackernews", "query": query, "results": [], "error": f"hackernews unavailable: {response.error}"}
+    results = []
+    for item in (response.data or {}).get("hits", [])[: config.search.max_results]:
+        title = item.get("title") or item.get("story_title") or ""
+        if not title:
+            continue
+        url = item.get("url") or f"https://news.ycombinator.com/item?id={item.get('objectID', '')}"
+        points = item.get("points")
+        comments = item.get("num_comments")
+        details = []
+        if points is not None:
+            details.append(f"{points} points")
+        if comments is not None:
+            details.append(f"{comments} comments")
+        author = item.get("author")
+        if author:
+            details.append(f"by {author}")
+        results.append({"title": title, "url": url, "content": ", ".join(details), "engine": "hackernews"})
+    return {"ok": True, "provider": "hackernews", "query": query, "results": results}
 
 
 def _instant_topics(items: list) -> list[dict]:

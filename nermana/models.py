@@ -36,13 +36,17 @@ class ModelManager:
         models: list[ModelInfo] = []
         for path in sorted(self.models_dir.iterdir()):
             suffix = path.suffix.lower()
-            if suffix not in {".gguf", ".guff"}:
+            if suffix not in {".gguf", ".guff"} or not path.is_file():
                 continue
+            try:
+                size_mb = round(path.stat().st_size / (1024 * 1024), 2)
+            except OSError:
+                size_mb = 0.0
             models.append(
                 ModelInfo(
                     name=path.name,
                     path=str(path),
-                    size_mb=round(path.stat().st_size / (1024 * 1024), 2),
+                    size_mb=size_mb,
                     active=path.name == self.config.model.active_model,
                     loadable=suffix == ".gguf",
                 )
@@ -135,13 +139,16 @@ class ModelManager:
         if not (target == root or root in target.parents):
             return {"ok": False, "error": "Model path is outside the models folder."}
         try:
+            if match.active:
+                self.stop_server()
             target.unlink()
         except OSError as exc:
-            return {"ok": False, "error": str(exc)}
+            hint = "Stop llama-server first if it is using this model." if match.active else "Check Termux file permissions and storage access."
+            return {"ok": False, "error": f"{exc}. {hint}", "path": str(target)}
         if self.config.model.active_model == model_name:
             self.config.model.active_model = ""
             self._save()
-        return {"ok": True, "deleted": model_name, "path": str(target)}
+        return {"ok": True, "deleted": model_name, "path": str(target), "active_model": self.config.model.active_model}
 
     def server_health(self) -> dict[str, Any]:
         response = get_json(f"{self.config.model.base_url.rstrip('/')}/models", timeout=2)

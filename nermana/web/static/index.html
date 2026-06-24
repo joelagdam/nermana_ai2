@@ -240,6 +240,7 @@
                 <option value="duckduckgo">DuckDuckGo</option>
                 <option value="searxng">SearXNG</option>
                 <option value="wikipedia">Wikipedia</option>
+                <option value="hackernews">Hacker News</option>
               </select>
             </label>
             <label>SearXNG URL <input name="search.searxng_url" placeholder="http://127.0.0.1:8888" /></label>
@@ -312,9 +313,11 @@
             <button class="primary-action">Save Telegram</button>
           </form>
           <div class="toolbar">
+            <button id="telegramStatus" type="button">Status</button>
             <button id="telegramStart">Start Polling</button>
             <button id="telegramPoll">Poll Once</button>
-            <button id="telegramResetOffset">Reset Offset</button>
+            <button id="telegramClearWebhook" type="button">Clear Webhook</button>
+            <button id="telegramResetOffset">Drop Pending</button>
           </div>
           <div id="telegramOutput" class="result-panel"></div>
         </section>

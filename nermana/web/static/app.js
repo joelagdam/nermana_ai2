@@ -571,12 +571,17 @@ async function renderModels() {
       renderResult("modelOutput", result);
       showModelTab("test");
     });
-    const remove = button("Delete", async () => {
-      const result = await runAction("Delete model", () => api("/api/models/delete", { method: "POST", body: JSON.stringify({ model_name: model.name }) }), "Model deleted");
+    const remove = button(model.active ? "Force Delete" : "Delete", async () => {
+      const note = model.active ? " This is the active model, so Nermana will clear it after deletion." : "";
+      if (!window.confirm(`Delete ${model.name}?${note}`)) return;
+      const result = await runAction(
+        "Delete model",
+        () => api("/api/models/delete", { method: "POST", body: JSON.stringify({ model_name: model.name, force: model.active }) }),
+        "Model deleted"
+      );
       renderResult("modelOutput", result);
       await renderModels();
     });
-    remove.disabled = model.active;
     list.appendChild(
       makeRow(
         model.name,
@@ -933,6 +938,10 @@ document.getElementById("telegramSettings").addEventListener("submit", async (ev
     .filter((x) => Number.isFinite(x) && x > 0);
   await runAction("Telegram", () => savePatch(patch));
 });
+document.getElementById("telegramStatus").addEventListener("click", async () => {
+  const result = await runAction("Telegram", () => api("/api/telegram/status"), "Status loaded");
+  renderResult("telegramOutput", result);
+});
 document.getElementById("telegramPoll").addEventListener("click", async () => {
   const result = await runAction("Telegram", () => api("/api/telegram/poll_once", { method: "POST" }), "Poll complete");
   renderResult("telegramOutput", result);
@@ -941,8 +950,12 @@ document.getElementById("telegramStart").addEventListener("click", async () => {
   const result = await runAction("Telegram", () => api("/api/telegram/start", { method: "POST" }), "Polling started");
   renderResult("telegramOutput", result);
 });
+document.getElementById("telegramClearWebhook").addEventListener("click", async () => {
+  const result = await runAction("Telegram", () => api("/api/telegram/clear_webhook", { method: "POST", body: JSON.stringify({ drop_pending_updates: false }) }), "Webhook cleared");
+  renderResult("telegramOutput", result);
+});
 document.getElementById("telegramResetOffset").addEventListener("click", async () => {
-  const result = await runAction("Telegram", () => api("/api/telegram/reset_offset", { method: "POST" }), "Offset reset");
+  const result = await runAction("Telegram", () => api("/api/telegram/reset_offset", { method: "POST", body: JSON.stringify({ drop_pending_updates: true }) }), "Pending updates dropped");
   renderResult("telegramOutput", result);
 });
 
