@@ -78,6 +78,16 @@ sh scripts/termux_start_all.sh
 
 The launcher keeps the web UI in the foreground and starts available services first. It auto-selects the first `.gguf` if no model is selected.
 
+## Update
+
+Nermana updates through git and keeps your local runtime data:
+
+```sh
+sh scripts/termux_update.sh
+```
+
+The updater preserves `data/config.json`, `data/`, and `models/`. You can also run `python -m nermana update` or press Update Nermana on the Settings page. Restart Nermana after an update so the running process loads the new code.
+
 ## Web Setup
 
 The Models page is the setup hub:
@@ -118,9 +128,9 @@ If you use Qwen3 GGUF, `/no_think` is used for fast general replies and `/think`
 
 By default, Nermana tries to run llama.cpp fast for the phone hardware: automatic CPU threads, model RAM lock with `--mlock`, tuned batch values, and a fallback start without memory flags if the phone rejects them.
 
-## Optional Python Extras
+## Python Packages
 
-The app runs without pip. `requirements.txt` is kept only for optional development installs outside the strict Termux setup. PDF extraction needs `pypdf`; if it is missing, normal text file reading still works.
+The app runs without pip packages on Termux. `requirements.txt` is only a placeholder that says no pip packages are required.
 
 ## Safety
 

@@ -6,6 +6,7 @@ from .agent import AgentCore
 from .capabilities import collect_capabilities
 from .config import load_config, merge_config, save_config
 from .telegram_bot import TelegramBot
+from .updater import update_system
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -28,6 +29,7 @@ def main(argv: list[str] | None = None) -> None:
     telegram = sub.add_parser("telegram")
     telegram.add_argument("--once", action="store_true")
     sub.add_parser("start")
+    sub.add_parser("update")
     args = parser.parse_args(argv)
 
     if args.command == "serve":
@@ -37,6 +39,9 @@ def main(argv: list[str] | None = None) -> None:
         from .startup import main as startup_main
 
         startup_main()
+        return
+    if args.command == "update":
+        print(json.dumps(update_system(), indent=2))
         return
 
     agent = AgentCore()
@@ -78,15 +83,9 @@ def _serve(args: argparse.Namespace) -> None:
     if patch["server"]:
         cfg = merge_config(cfg, patch)
         save_config(cfg)
-    try:
-        import fastapi  # noqa: F401
-        import uvicorn
+    from .simple_server import serve
 
-        uvicorn.run("nermana.server:app", host=cfg.server.host, port=cfg.server.port, reload=False)
-    except ImportError:
-        from .simple_server import serve
-
-        serve(cfg.server.host, cfg.server.port)
+    serve(cfg.server.host, cfg.server.port)
 
 
 if __name__ == "__main__":

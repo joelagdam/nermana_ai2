@@ -1,5 +1,2 @@
-# Optional only. Termux setup does not use pip.
-fastapi>=0.110
-uvicorn>=0.27
-websockets>=12
-pypdf>=4
+# No pip packages are required for Termux.
+# Use Termux pkg packages only.

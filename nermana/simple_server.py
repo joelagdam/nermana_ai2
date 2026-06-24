@@ -12,6 +12,7 @@ from .capabilities import collect_capabilities
 from .config import merge_config, save_config
 from .model_downloads import download_model, download_preset, list_presets
 from .telegram_bot import TelegramBot
+from .updater import update_system
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
@@ -76,6 +77,8 @@ class NermanaHandler(BaseHTTPRequestHandler):
                     "tools": self.agent.tools.list_metadata(),
                 }
             )
+        elif path == "/api/update/status":
+            self._json({"ok": True, "message": "Updater ready. Config and models are preserved."})
         else:
             self._json({"ok": False, "error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -137,6 +140,8 @@ class NermanaHandler(BaseHTTPRequestHandler):
                 self._json(TelegramBot(self.agent).poll_once())
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)})
+        elif path == "/api/update":
+            self._json(update_system())
         else:
             self._json({"ok": False, "error": "not found"}, HTTPStatus.NOT_FOUND)
 

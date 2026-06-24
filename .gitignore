@@ -8,5 +8,6 @@ data/*.sqlite3
 data/*.sqlite3-*
 data/*.log
 data/config.json
+data/backups/
 models/*.gguf
 models/*.guff

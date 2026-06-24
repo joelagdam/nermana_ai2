@@ -540,6 +540,11 @@ document.getElementById("settingsForm").addEventListener("submit", async (event)
   output("settingsOutput", result);
 });
 
+document.getElementById("updateButton").addEventListener("click", async () => {
+  const result = await runAction("Update", () => api("/api/update", { method: "POST", body: JSON.stringify({}) }), "Update finished");
+  output("updateOutput", result);
+});
+
 refreshAll().catch((error) => {
   statusLine.textContent = String(error.message || error);
   showToast("Startup", String(error.message || error), "error");
