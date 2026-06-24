@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
-
 from .agent import AgentCore
 from .capabilities import collect_capabilities
 from .config import load_config, merge_config, save_config
@@ -75,11 +73,14 @@ def _serve(args: argparse.Namespace) -> None:
         cfg = merge_config(cfg, patch)
         save_config(cfg)
     try:
+        import fastapi  # noqa: F401
         import uvicorn
+
+        uvicorn.run("nermana.server:app", host=cfg.server.host, port=cfg.server.port, reload=False)
     except ImportError:
-        print("FastAPI server dependencies are not installed. Install requirements.txt first.", file=sys.stderr)
-        raise SystemExit(2)
-    uvicorn.run("nermana.server:app", host=cfg.server.host, port=cfg.server.port, reload=False)
+        from .simple_server import serve
+
+        serve(cfg.server.host, cfg.server.port)
 
 
 if __name__ == "__main__":

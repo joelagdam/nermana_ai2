@@ -8,13 +8,10 @@ version = "0.1.0"
 description = "Offline-first Termux AI agent with configurable local models and tools."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-  "fastapi>=0.110",
-  "uvicorn>=0.27",
-  "websockets>=12",
-]
+dependencies = []
 
 [project.optional-dependencies]
+fastapi = ["fastapi>=0.110", "uvicorn>=0.27", "websockets>=12"]
 pdf = ["pypdf>=4"]
 
 [project.scripts]

@@ -4,6 +4,8 @@ Nermana is an offline-first phone AI scaffold for Android through Termux. It run
 
 This project is designed for Termux first. Desktop systems are only useful as a development mirror.
 
+The Termux setup does not run `pip install`. It uses standard-library Python for the web UI by default and skips packages or tools that are already installed.
+
 ## What Works
 
 - Local ADK-style agent core with memory, tools, settings, and safety checks.
@@ -26,6 +28,8 @@ cd nermana
 sh scripts/termux_setup.sh
 ```
 
+The setup script checks each package before installing it. If `python`, `git`, `clang`, `cmake`, `make`, `termux-api`, or `llama-server` already exists, it skips that part. It never installs or upgrades pip.
+
 Give Termux shared-storage access if you want Nermana to read approved files from phone storage:
 
 ```sh
@@ -36,6 +40,12 @@ Build or install `llama.cpp`, place `.gguf` models in `models/`, then start the 
 
 ```sh
 sh scripts/termux_llama_server.sh
+```
+
+If your Termux repository provides `llama.cpp` and you want the setup script to try installing it only when `llama-server` is missing, run:
+
+```sh
+NERMANA_INSTALL_LLAMA=1 sh scripts/termux_setup.sh
 ```
 
 In another Termux session, start the web UI:
@@ -68,6 +78,10 @@ python -m nermana telegram --once
 The default path expects a `llama.cpp` server compatible with `/v1/chat/completions`. The Models page scans the Termux project `models/` folder, selects a `.gguf`, edits runtime settings, and can attempt to restart `llama-server`.
 
 If you use Qwen3 GGUF, `/no_think` is used for fast general replies and `/think` is used automatically for harder prompts.
+
+## Optional Python Extras
+
+The app runs without pip. `requirements.txt` is kept only for optional development installs outside the strict Termux setup. PDF extraction needs `pypdf`; if it is missing, normal text file reading still works.
 
 ## Safety
 
