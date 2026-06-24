@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nermana</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="rail">
+        <div class="brand">Nermana</div>
+        <nav id="nav">
+          <button data-page="chat" class="active">Chat</button>
+          <button data-page="models">Models</button>
+          <button data-page="tools">Tools</button>
+          <button data-page="memory">Memory</button>
+          <button data-page="files">Files</button>
+          <button data-page="providers">Providers</button>
+          <button data-page="phone">Phone</button>
+          <button data-page="telegram">Telegram</button>
+          <button data-page="logs">Logs</button>
+          <button data-page="settings">Settings</button>
+        </nav>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <h1 id="pageTitle">Chat</h1>
+            <p id="statusLine">Loading status</p>
+          </div>
+          <button id="refreshButton">Refresh</button>
+        </header>
+
+        <section id="chat" class="page active">
+          <div id="chatLog" class="chat-log"></div>
+          <form id="chatForm" class="composer">
+            <input id="chatInput" name="message" autocomplete="off" placeholder="Ask Nermana" />
+            <button>Send</button>
+          </form>
+        </section>
+
+        <section id="models" class="page">
+          <div class="toolbar">
+            <button id="scanModels">Scan Models</button>
+            <button id="restartModel">Restart Server</button>
+          </div>
+          <div id="modelsList" class="list"></div>
+          <form id="modelSettings" class="grid-form">
+            <label>Base URL <input name="base_url" /></label>
+            <label>llama-server <input name="llama_server_path" /></label>
+            <label>Context <input name="context_size" type="number" min="512" step="512" /></label>
+            <label>Threads <input name="threads" type="number" min="1" /></label>
+            <label>Temperature <input name="temperature" type="number" step="0.05" min="0" max="2" /></label>
+            <label>Top P <input name="top_p" type="number" step="0.05" min="0" max="1" /></label>
+            <label>Thinking
+              <select name="thinking_mode">
+                <option value="auto">auto</option>
+                <option value="no_think">no_think</option>
+                <option value="think">think</option>
+              </select>
+            </label>
+            <button>Save Model Settings</button>
+          </form>
+          <form id="modelTest" class="inline-form">
+            <input name="message" placeholder="Model test prompt" />
+            <button>Test</button>
+          </form>
+          <pre id="modelOutput"></pre>
+        </section>
+
+        <section id="tools" class="page">
+          <div id="toolsList" class="table"></div>
+          <form id="toolRun" class="tool-run">
+            <select name="tool"></select>
+            <textarea name="payload" spellcheck="false">{}</textarea>
+            <button>Run Tool</button>
+          </form>
+          <pre id="toolOutput"></pre>
+        </section>
+
+        <section id="memory" class="page">
+          <form id="memorySearch" class="inline-form">
+            <input name="q" placeholder="Search memory" />
+            <button>Search</button>
+          </form>
+          <form id="memoryAdd" class="stack-form">
+            <textarea name="content" placeholder="Memory text"></textarea>
+            <input name="tags" placeholder="tags" />
+            <button>Add Memory</button>
+          </form>
+          <div id="memoryList" class="list"></div>
+        </section>
+
+        <section id="files" class="page">
+          <form id="fileSettings" class="stack-form">
+            <textarea name="allowed_dirs" spellcheck="false"></textarea>
+            <label>Max read MB <input name="max_read_mb" type="number" min="1" /></label>
+            <button>Save File Settings</button>
+          </form>
+          <form id="fileRead" class="inline-form">
+            <input name="path" placeholder="Allowed file or folder path" />
+            <button name="action" value="read">Read</button>
+            <button name="action" value="list">List</button>
+            <button name="action" value="index">Index</button>
+          </form>
+          <pre id="fileOutput"></pre>
+        </section>
+
+        <section id="providers" class="page">
+          <form id="providersForm" class="grid-form">
+            <label>SearXNG URL <input name="search.searxng_url" /></label>
+            <label>Search enabled <input name="search.enabled" type="checkbox" /></label>
+            <label>Weather location <input name="weather.location_name" /></label>
+            <label>Latitude <input name="weather.latitude" type="number" step="0.0001" /></label>
+            <label>Longitude <input name="weather.longitude" type="number" step="0.0001" /></label>
+            <label>Image enabled <input name="providers.image_enabled" type="checkbox" /></label>
+            <label>Image endpoint <input name="providers.image_endpoint" /></label>
+            <label>Image key <input name="providers.image_api_key" /></label>
+            <label>Vision enabled <input name="providers.vision_enabled" type="checkbox" /></label>
+            <label>Vision endpoint <input name="providers.vision_endpoint" /></label>
+            <label>Vision key <input name="providers.vision_api_key" /></label>
+            <button>Save Providers</button>
+          </form>
+        </section>
+
+        <section id="phone" class="page">
+          <form id="phoneSettings" class="grid-form">
+            <label>Phone control <input name="phone.enabled" type="checkbox" /></label>
+            <label>Termux <input name="phone.termux_enabled" type="checkbox" /></label>
+            <label>Shizuku <input name="phone.shizuku_enabled" type="checkbox" /></label>
+            <label>rish path <input name="phone.rish_path" /></label>
+            <label>Autonomy
+              <select name="safety.max_tool_risk">
+                <option value="read">read</option>
+                <option value="power">power</option>
+              </select>
+            </label>
+            <button>Save Phone Settings</button>
+          </form>
+          <div class="toolbar">
+            <button data-phone-tool="phone_status">Status</button>
+            <button data-phone-tool="list_packages">Packages</button>
+          </div>
+          <form id="phoneAction" class="grid-form">
+            <label>Package <input name="package" /></label>
+            <label>Permission <input name="permission" /></label>
+            <label>Namespace <input name="namespace" value="system" /></label>
+            <label>Key <input name="key" /></label>
+            <label>Value <input name="value" /></label>
+            <label>Enabled <input name="enabled" type="checkbox" checked /></label>
+            <label>Granted <input name="granted" type="checkbox" checked /></label>
+            <label>AppOp <input name="op" /></label>
+            <label>Mode <input name="mode" /></label>
+            <select name="tool">
+              <option value="force_stop_app">force_stop_app</option>
+              <option value="set_app_enabled">set_app_enabled</option>
+              <option value="set_permission">set_permission</option>
+              <option value="appops_set">appops_set</option>
+              <option value="settings_get">settings_get</option>
+              <option value="settings_put">settings_put</option>
+            </select>
+            <button>Run Phone Action</button>
+          </form>
+          <pre id="phoneOutput"></pre>
+        </section>
+
+        <section id="telegram" class="page">
+          <form id="telegramSettings" class="grid-form">
+            <label>Enabled <input name="telegram.enabled" type="checkbox" /></label>
+            <label>Token <input name="telegram.token" /></label>
+            <label>Allowed user IDs <input name="telegram.allowed_user_ids" /></label>
+            <button>Save Telegram</button>
+          </form>
+          <button id="telegramPoll">Poll Once</button>
+          <pre id="telegramOutput"></pre>
+        </section>
+
+        <section id="logs" class="page">
+          <pre id="logsOutput"></pre>
+        </section>
+
+        <section id="settings" class="page">
+          <form id="settingsForm" class="stack-form">
+            <textarea id="settingsJson" spellcheck="false"></textarea>
+            <button>Save JSON</button>
+          </form>
+          <pre id="settingsOutput"></pre>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

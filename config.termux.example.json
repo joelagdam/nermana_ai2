@@ -1,0 +1,88 @@
+{
+  "files": {
+    "allowed_dirs": [
+      "data"
+    ],
+    "enabled": true,
+    "index_memory": true,
+    "max_read_mb": 5
+  },
+  "memory": {
+    "auto_remember": true,
+    "db_path": "data/nermana.sqlite3",
+    "retain_messages": 200
+  },
+  "model": {
+    "active_model": "",
+    "auto_start_server": false,
+    "base_url": "http://127.0.0.1:8080/v1",
+    "context_size": 4096,
+    "fallback_model": "",
+    "llama_server_path": "llama-server",
+    "models_dir": "models",
+    "temperature": 0.7,
+    "thinking_mode": "auto",
+    "threads": 4,
+    "top_p": 0.8
+  },
+  "phone": {
+    "allowed_settings_namespaces": [
+      "system",
+      "secure",
+      "global"
+    ],
+    "autonomy": "power_user",
+    "command_timeout_seconds": 12.0,
+    "enabled": true,
+    "rish_path": "rish",
+    "shizuku_enabled": true,
+    "termux_enabled": true
+  },
+  "providers": {
+    "image_api_key": "",
+    "image_enabled": false,
+    "image_endpoint": "",
+    "timeout_seconds": 60.0,
+    "vision_api_key": "",
+    "vision_enabled": false,
+    "vision_endpoint": ""
+  },
+  "safety": {
+    "autonomy": "power_user",
+    "blocked_tools": [
+      "phone_shell"
+    ],
+    "max_tool_risk": "power",
+    "require_confirmation_for_power": false
+  },
+  "search": {
+    "enabled": true,
+    "max_results": 5,
+    "provider": "searxng",
+    "safe_search": 1,
+    "searxng_url": "",
+    "timeout_seconds": 8.0
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "public_url": ""
+  },
+  "telegram": {
+    "allowed_user_ids": [],
+    "enabled": false,
+    "poll_interval_seconds": 2.0,
+    "token": ""
+  },
+  "tool_enabled": {},
+  "weather": {
+    "enabled": true,
+    "latitude": null,
+    "location_name": "",
+    "longitude": null,
+    "temperature_unit": "celsius",
+    "timeout_seconds": 8.0,
+    "timezone": "auto",
+    "wind_speed_unit": "kmh"
+  }
+}
