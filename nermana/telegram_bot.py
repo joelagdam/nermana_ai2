@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from typing import Any
 
 from .agent import AgentCore
@@ -39,10 +40,21 @@ class TelegramBot:
             if self.config.allowed_user_ids and user_id not in self.config.allowed_user_ids:
                 self._send(chat_id, "This bot is private.")
                 continue
-            reply = self.agent.chat(text, session_id=f"telegram-{chat_id}")["reply"]
+            stop_typing = threading.Event()
+            typing_thread = threading.Thread(target=self._typing_loop, args=(chat_id, stop_typing), daemon=True)
+            typing_thread.start()
+            try:
+                reply = self.agent.chat(text, session_id=f"telegram-{chat_id}")["reply"]
+            finally:
+                stop_typing.set()
             self._send(chat_id, reply[:3900])
             processed += 1
         return {"ok": True, "processed": processed}
 
     def _send(self, chat_id: int, text: str) -> None:
         post_json(f"{self.base_url}/sendMessage", {"chat_id": chat_id, "text": text}, timeout=10)
+
+    def _typing_loop(self, chat_id: int, stop: threading.Event) -> None:
+        while not stop.is_set():
+            post_json(f"{self.base_url}/sendChatAction", {"chat_id": chat_id, "action": "typing"}, timeout=5)
+            stop.wait(4)

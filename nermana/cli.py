@@ -27,10 +27,16 @@ def main(argv: list[str] | None = None) -> None:
     memory.add_argument("--add")
     telegram = sub.add_parser("telegram")
     telegram.add_argument("--once", action="store_true")
+    sub.add_parser("start")
     args = parser.parse_args(argv)
 
     if args.command == "serve":
         _serve(args)
+        return
+    if args.command == "start":
+        from .startup import main as startup_main
+
+        startup_main()
         return
 
     agent = AgentCore()

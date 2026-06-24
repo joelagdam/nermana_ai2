@@ -70,6 +70,14 @@ sh scripts/termux_start.sh
 
 Open `http://127.0.0.1:8765` on the phone.
 
+For normal use, the centralized launcher starts everything available: selected local model, Telegram polling if enabled, and the web UI.
+
+```sh
+sh scripts/termux_start_all.sh
+```
+
+The launcher keeps the web UI in the foreground and starts available services first. It auto-selects the first `.gguf` if no model is selected.
+
 ## Web Setup
 
 The Models page is the setup hub:
@@ -80,6 +88,8 @@ The Models page is the setup hub:
 - Select the downloaded model.
 - Edit context size, threads, temperature, top-p, thinking mode, and model server URL.
 - Restart the local `llama-server` after a model is selected.
+- Tune performance: auto threads, batch sizes, request timeout, RAM lock, and mmap mode.
+- Control semi-automatic tool decisions and confirmation behavior from the Tools page.
 
 Preset downloads require internet on the phone. If the phone is offline, put `.gguf` files in `models/` manually and press Scan Models.
 
@@ -105,6 +115,8 @@ python -m nermana telegram --once
 The default path expects a `llama.cpp` server compatible with `/v1/chat/completions`. The Models page scans the Termux project `models/` folder, selects a `.gguf`, downloads presets or direct links, edits runtime settings, and can attempt to restart `llama-server`.
 
 If you use Qwen3 GGUF, `/no_think` is used for fast general replies and `/think` is used automatically for harder prompts.
+
+By default, Nermana tries to run llama.cpp fast for the phone hardware: automatic CPU threads, model RAM lock with `--mlock`, tuned batch values, and a fallback start without memory flags if the phone rejects them.
 
 ## Optional Python Extras
 

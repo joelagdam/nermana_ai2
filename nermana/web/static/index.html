@@ -73,7 +73,13 @@
             <label>Base URL <input name="base_url" /></label>
             <label>llama-server <input name="llama_server_path" placeholder="auto or ~/llama.cpp/build/bin/llama-server" /></label>
             <label>Context <input name="context_size" type="number" min="512" step="512" /></label>
-            <label>Threads <input name="threads" type="number" min="1" /></label>
+            <label>Threads <input name="threads" type="number" min="0" /></label>
+            <label>Batch <input name="batch_size" type="number" min="64" step="64" /></label>
+            <label>Micro batch <input name="ubatch_size" type="number" min="32" step="32" /></label>
+            <label>Parallel slots <input name="parallel_slots" type="number" min="1" /></label>
+            <label>Timeout seconds <input name="request_timeout_seconds" type="number" min="15" step="5" /></label>
+            <label>Lock model in RAM <input name="mlock" type="checkbox" /></label>
+            <label>No mmap <input name="no_mmap" type="checkbox" /></label>
             <label>Temperature <input name="temperature" type="number" step="0.05" min="0" max="2" /></label>
             <label>Top P <input name="top_p" type="number" step="0.05" min="0" max="1" /></label>
             <label>Thinking
@@ -94,6 +100,17 @@
         </section>
 
         <section id="tools" class="page">
+          <form id="toolDecisionSettings" class="grid-form">
+            <label>Semi-auto tools <input name="safety.semi_auto_tools_enabled" type="checkbox" /></label>
+            <label>Confirm before tools <input name="safety.confirm_semi_auto_tools" type="checkbox" /></label>
+            <label>Max tool risk
+              <select name="safety.max_tool_risk">
+                <option value="read">read</option>
+                <option value="power">power</option>
+              </select>
+            </label>
+            <button class="primary-action">Save Tool Decisions</button>
+          </form>
           <div id="toolsList" class="table"></div>
           <form id="toolRun" class="tool-run">
             <select name="tool"></select>
@@ -133,16 +150,16 @@
 
         <section id="providers" class="page">
           <form id="providersForm" class="grid-form">
-            <label>SearXNG URL <input name="search.searxng_url" /></label>
+            <label>SearXNG URL <input name="search.searxng_url" placeholder="http://127.0.0.1:8888" /></label>
             <label>Search enabled <input name="search.enabled" type="checkbox" /></label>
             <label>Weather location <input name="weather.location_name" /></label>
             <label>Latitude <input name="weather.latitude" type="number" step="0.0001" /></label>
             <label>Longitude <input name="weather.longitude" type="number" step="0.0001" /></label>
             <label>Image enabled <input name="providers.image_enabled" type="checkbox" /></label>
-            <label>Image endpoint <input name="providers.image_endpoint" /></label>
+            <label>Image endpoint <input name="providers.image_endpoint" placeholder="http://127.0.0.1:7860/sdapi/v1/txt2img" /></label>
             <label>Image key <input name="providers.image_api_key" /></label>
             <label>Vision enabled <input name="providers.vision_enabled" type="checkbox" /></label>
-            <label>Vision endpoint <input name="providers.vision_endpoint" /></label>
+            <label>Vision endpoint <input name="providers.vision_endpoint" placeholder="http://127.0.0.1:8081/v1/vision" /></label>
             <label>Vision key <input name="providers.vision_api_key" /></label>
             <button class="primary-action">Save Providers</button>
           </form>

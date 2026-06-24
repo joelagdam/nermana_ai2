@@ -95,4 +95,4 @@ mkdir -p models data
 echo "Nermana is ready."
 echo "No pip install was run."
 echo "Put .gguf models in: $(pwd)/models"
-echo "Start the web UI with: sh scripts/termux_start.sh"
+echo "Start everything available with: sh scripts/termux_start_all.sh"

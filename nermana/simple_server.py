@@ -18,8 +18,8 @@ STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
 
 
 class SimpleNermanaServer:
-    def __init__(self):
-        self.agent = AgentCore()
+    def __init__(self, agent: AgentCore | None = None):
+        self.agent = agent or AgentCore()
 
     def serve(self, host: str, port: int) -> None:
         outer = self

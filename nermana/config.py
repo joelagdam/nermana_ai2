@@ -48,7 +48,13 @@ class ModelConfig:
     context_size: int = 4096
     temperature: float = 0.7
     top_p: float = 0.8
-    threads: int = 4
+    threads: int = 0
+    batch_size: int = 512
+    ubatch_size: int = 128
+    parallel_slots: int = 1
+    mlock: bool = True
+    no_mmap: bool = False
+    request_timeout_seconds: float = 120.0
     thinking_mode: str = "auto"
     auto_start_server: bool = False
 
@@ -66,7 +72,7 @@ class SearchConfig:
 @dataclass
 class WeatherConfig:
     enabled: bool = True
-    location_name: str = ""
+    location_name: str = "Tagum City"
     latitude: float | None = None
     longitude: float | None = None
     temperature_unit: str = "celsius"
@@ -124,6 +130,8 @@ class MemoryConfig:
 class SafetyConfig:
     autonomy: str = "power_user"
     require_confirmation_for_power: bool = False
+    semi_auto_tools_enabled: bool = True
+    confirm_semi_auto_tools: bool = True
     blocked_tools: list[str] = field(default_factory=lambda: ["phone_shell"])
     max_tool_risk: str = "power"
 

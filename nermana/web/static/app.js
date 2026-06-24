@@ -143,6 +143,12 @@ function fillForms() {
     llama_server_path: config.model.llama_server_path,
     context_size: config.model.context_size,
     threads: config.model.threads,
+    batch_size: config.model.batch_size,
+    ubatch_size: config.model.ubatch_size,
+    parallel_slots: config.model.parallel_slots,
+    request_timeout_seconds: config.model.request_timeout_seconds,
+    mlock: config.model.mlock,
+    no_mmap: config.model.no_mmap,
     temperature: config.model.temperature,
     top_p: config.model.top_p,
     thinking_mode: config.model.thinking_mode,
@@ -150,6 +156,7 @@ function fillForms() {
   document.querySelector("#fileSettings [name=allowed_dirs]").value = (config.files.allowed_dirs || []).join("\n");
   document.querySelector("#fileSettings [name=max_read_mb]").value = config.files.max_read_mb;
   setDottedForm("providersForm", config);
+  setDottedForm("toolDecisionSettings", config);
   setDottedForm("phoneSettings", config);
   setDottedForm("telegramSettings", config);
   document.querySelector("#telegramSettings [name='telegram.allowed_user_ids']").value = (config.telegram.allowed_user_ids || []).join(",");
@@ -358,6 +365,12 @@ document.getElementById("modelSettings").addEventListener("submit", async (event
         llama_server_path: form.llama_server_path.value,
         context_size: Number(form.context_size.value),
         threads: Number(form.threads.value),
+        batch_size: Number(form.batch_size.value),
+        ubatch_size: Number(form.ubatch_size.value),
+        parallel_slots: Number(form.parallel_slots.value),
+        request_timeout_seconds: Number(form.request_timeout_seconds.value),
+        mlock: form.mlock.checked,
+        no_mmap: form.no_mmap.checked,
         temperature: Number(form.temperature.value),
         top_p: Number(form.top_p.value),
         thinking_mode: form.thinking_mode.value,
@@ -402,6 +415,11 @@ document.getElementById("toolRun").addEventListener("submit", async (event) => {
   }
   const result = await runAction("Tool", () => api(`/api/tools/${form.tool.value}/run`, { method: "POST", body: JSON.stringify({ payload }) }), "Tool finished");
   output("toolOutput", result);
+});
+
+document.getElementById("toolDecisionSettings").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await runAction("Tool decisions", () => savePatch(patchFromDottedForm("toolDecisionSettings")));
 });
 
 async function renderMemory() {

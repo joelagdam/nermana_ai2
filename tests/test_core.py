@@ -61,6 +61,15 @@ class ModelTests(unittest.TestCase):
             self.assertFalse(download_model(cfg, "https://example.com/model.bin")["ok"])
             self.assertTrue(any(preset["id"] == "qwen25_15b_instruct_q4" for preset in list_presets()))
 
+    def test_llama_command_uses_fast_phone_settings(self) -> None:
+        cfg = AppConfig(model=ModelConfig(threads=0, batch_size=256, ubatch_size=64, parallel_slots=1, mlock=True, no_mmap=True))
+        manager = ModelManager(cfg, persist=False)
+        command = manager._server_command("llama-server", Path("models/test.gguf"), 8080, fast=True)
+        self.assertIn("--mlock", command)
+        self.assertIn("--no-mmap", command)
+        self.assertIn("-b", command)
+        self.assertIn("256", command)
+
 
 class MemoryTests(unittest.TestCase):
     def test_memory_retains_and_searches(self) -> None:
@@ -119,6 +128,25 @@ class AgentTests(unittest.TestCase):
             result = agent.chat(f"/read {note}", session_id="test")
             self.assertTrue(result["ok"])
             self.assertIn("offline file", result["reply"])
+
+    def test_agent_confirms_semi_auto_tool_before_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            result = agent.chat("what is the weather today?", session_id="confirm")
+            self.assertIn("Reply `yes`", result["reply"])
+            self.assertIn("confirm", agent.pending_actions)
+            canceled = agent.chat("cancel", session_id="confirm")
+            self.assertEqual(canceled["reply"], "Canceled.")
+
+    def test_agent_can_confirm_memory_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            result = agent.chat("remember this: I prefer short replies", session_id="mem")
+            self.assertIn("save that to memory", result["reply"].lower())
+            saved = agent.chat("yes", session_id="mem")
+            self.assertIn("Saved to memory", saved["reply"])
 
 
 if __name__ == "__main__":

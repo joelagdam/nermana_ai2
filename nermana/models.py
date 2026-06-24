@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import time
 import shutil
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -124,7 +125,7 @@ class ModelManager:
         response = post_json(
             f"{self.config.model.base_url.rstrip('/')}/chat/completions",
             payload,
-            timeout=120,
+            timeout=self.config.model.request_timeout_seconds,
         )
         if not response.ok:
             return {"ok": False, "error": response.error}
@@ -147,21 +148,14 @@ class ModelManager:
             }
         self.stop_server()
         port = self._port_from_base_url()
-        command = [
-            llama_server,
-            "-m",
-            str(model),
-            "-c",
-            str(self.config.model.context_size),
-            "--port",
-            str(port),
-        ]
+        command = self._server_command(llama_server, model, port, fast=True)
         try:
-            self._process = subprocess.Popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            self._process = self._start_process(command)
+            time.sleep(1)
+            if self._process.poll() is not None and self._uses_memory_flags(command):
+                fallback = self._server_command(llama_server, model, port, fast=False)
+                self._process = self._start_process(fallback)
+                command = fallback
         except Exception as exc:
             if self.config.model.fallback_model:
                 self.config.model.active_model = self.config.model.fallback_model
@@ -170,7 +164,45 @@ class ModelManager:
         time.sleep(1)
         health = self.server_health()
         health["started_process"] = self._process.pid if self._process else None
+        health["command"] = command
         return health
+
+    def _server_command(self, llama_server: str, model: Path, port: int, fast: bool) -> list[str]:
+        threads = self.config.model.threads or max(1, os.cpu_count() or 1)
+        command = [
+            llama_server,
+            "-m",
+            str(model),
+            "-c",
+            str(self.config.model.context_size),
+            "-t",
+            str(threads),
+            "-b",
+            str(self.config.model.batch_size),
+            "-ub",
+            str(self.config.model.ubatch_size),
+            "--parallel",
+            str(self.config.model.parallel_slots),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ]
+        if fast and self.config.model.mlock:
+            command.append("--mlock")
+        if fast and self.config.model.no_mmap:
+            command.append("--no-mmap")
+        return command
+
+    def _start_process(self, command: list[str]) -> subprocess.Popen:
+        return subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _uses_memory_flags(self, command: list[str]) -> bool:
+        return "--mlock" in command or "--no-mmap" in command
 
     def stop_server(self) -> None:
         if self._process and self._process.poll() is None:

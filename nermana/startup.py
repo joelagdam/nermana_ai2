@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import signal
+import threading
+from typing import Any
+
+from .agent import AgentCore
+from .config import load_config, save_config
+from .simple_server import SimpleNermanaServer
+from .telegram_bot import TelegramBot
+
+
+class StartupManager:
+    def __init__(self):
+        self.agent = AgentCore(load_config())
+        self.telegram_thread: threading.Thread | None = None
+        self.model_started = False
+
+    def start(self) -> None:
+        self._select_first_model_if_needed()
+        self._start_model_if_available()
+        self._start_telegram_if_available()
+        self._serve_web()
+
+    def _select_first_model_if_needed(self) -> None:
+        if self.agent.config.model.active_model:
+            return
+        first = next((model for model in self.agent.models.scan() if model.loadable), None)
+        if not first:
+            return
+        self.agent.config.model.active_model = first.name
+        save_config(self.agent.config)
+
+    def _start_model_if_available(self) -> None:
+        if not self.agent.config.model.active_model:
+            print("model: no .gguf selected or available")
+            return
+        if self.agent.models.server_health().get("ok"):
+            print("model: llama-server already responding")
+            return
+        result = self.agent.models.restart_server()
+        self.model_started = bool(result.get("started_process"))
+        if result.get("ok"):
+            print("model: started and responding")
+        elif self.model_started:
+            print("model: started, still warming up")
+        else:
+            print(f"model: {result.get('error', 'not started')}")
+
+    def _start_telegram_if_available(self) -> None:
+        cfg = self.agent.config.telegram
+        if not cfg.enabled or not cfg.token:
+            print("telegram: disabled")
+            return
+        bot = TelegramBot(self.agent)
+        self.telegram_thread = threading.Thread(target=bot.run_forever, name="nermana-telegram", daemon=True)
+        self.telegram_thread.start()
+        print("telegram: polling")
+
+    def _serve_web(self) -> None:
+        host = self.agent.config.server.host
+        port = self.agent.config.server.port
+        server = SimpleNermanaServer(self.agent)
+        self._install_signal_handlers()
+        print("web: starting")
+        try:
+            server.serve(host, port)
+        finally:
+            self.shutdown()
+
+    def _install_signal_handlers(self) -> None:
+        def handler(signum: int, _frame: Any) -> None:
+            print(f"shutdown: signal {signum}")
+            self.shutdown()
+            raise SystemExit(0)
+
+        signal.signal(signal.SIGINT, handler)
+        signal.signal(signal.SIGTERM, handler)
+
+    def shutdown(self) -> None:
+        if self.model_started:
+            self.agent.models.stop_server()
+
+
+def main() -> None:
+    StartupManager().start()
+
+
+if __name__ == "__main__":
+    main()

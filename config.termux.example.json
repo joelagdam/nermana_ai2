@@ -16,13 +16,18 @@
     "active_model": "",
     "auto_start_server": false,
     "base_url": "http://127.0.0.1:8080/v1",
+    "batch_size": 512,
     "context_size": 4096,
     "fallback_model": "",
     "llama_server_path": "auto",
+    "mlock": true,
     "models_dir": "models",
+    "no_mmap": false,
+    "parallel_slots": 1,
+    "request_timeout_seconds": 120.0,
     "temperature": 0.7,
     "thinking_mode": "auto",
-    "threads": 4,
+    "threads": 0,
     "top_p": 0.8
   },
   "phone": {
@@ -52,8 +57,10 @@
     "blocked_tools": [
       "phone_shell"
     ],
+    "confirm_semi_auto_tools": true,
     "max_tool_risk": "power",
-    "require_confirmation_for_power": false
+    "require_confirmation_for_power": false,
+    "semi_auto_tools_enabled": true
   },
   "search": {
     "enabled": true,
@@ -78,7 +85,7 @@
   "weather": {
     "enabled": true,
     "latitude": null,
-    "location_name": "",
+    "location_name": "Tagum City",
     "longitude": null,
     "temperature_unit": "celsius",
     "timeout_seconds": 8.0,
