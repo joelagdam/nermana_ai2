@@ -5,16 +5,41 @@ const pages = Array.from(document.querySelectorAll(".page"));
 const navButtons = Array.from(document.querySelectorAll("#nav button"));
 const pageTitle = document.getElementById("pageTitle");
 const statusLine = document.getElementById("statusLine");
+const statusPills = document.getElementById("statusPills");
+const toastStack = document.getElementById("toastStack");
+const rail = document.querySelector(".rail");
+const drawerButton = document.getElementById("drawerButton");
+const drawerBackdrop = document.getElementById("drawerBackdrop");
 
 navButtons.forEach((button) => {
-  button.addEventListener("click", () => showPage(button.dataset.page));
+  button.addEventListener("click", () => {
+    showPage(button.dataset.page);
+    closeDrawer();
+  });
 });
-document.getElementById("refreshButton").addEventListener("click", refreshAll);
+
+drawerButton.addEventListener("click", openDrawer);
+drawerBackdrop.addEventListener("click", closeDrawer);
+document.getElementById("refreshButton").addEventListener("click", () => runAction("Refresh", refreshAll));
 
 function showPage(id) {
   pages.forEach((page) => page.classList.toggle("active", page.id === id));
-  navButtons.forEach((button) => button.classList.toggle("active", button.dataset.page === id));
+  navButtons.forEach((button) => {
+    const active = button.dataset.page === id;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
   pageTitle.textContent = navButtons.find((button) => button.dataset.page === id)?.textContent || "Nermana";
+}
+
+function openDrawer() {
+  rail.classList.add("open");
+  drawerBackdrop.classList.add("open");
+}
+
+function closeDrawer() {
+  rail.classList.remove("open");
+  drawerBackdrop.classList.remove("open");
 }
 
 async function api(path, options = {}) {
@@ -22,11 +47,47 @@ async function api(path, options = {}) {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || response.statusText);
+  const text = await response.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { ok: false, error: text };
+    }
   }
-  return response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || data.error || response.statusText);
+  }
+  return data;
+}
+
+async function runAction(title, task, successMessage = "Done") {
+  showToast(title, "Working", "pending", 1800);
+  try {
+    const result = await task();
+    if (result && result.ok === false) {
+      showToast(title, result.error || "Action failed.", "error");
+    } else {
+      showToast(title, successMessage, "success");
+    }
+    return result;
+  } catch (error) {
+    showToast(title, String(error.message || error), "error");
+    return { ok: false, error: String(error.message || error) };
+  }
+}
+
+function showToast(title, message, type = "success", timeout = 7000) {
+  const toast = document.createElement("div");
+  toast.className = `toast ${type}`;
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  const text = document.createElement("p");
+  text.textContent = message;
+  toast.append(strong, text);
+  toastStack.appendChild(toast);
+  setTimeout(() => toast.remove(), timeout);
 }
 
 function output(nodeId, value) {
@@ -37,12 +98,13 @@ async function refreshAll() {
   config = await api("/api/settings");
   statusCache = await api("/api/status");
   statusLine.textContent = summarizeStatus(statusCache);
+  renderStatusPills(statusCache);
   fillForms();
-  renderPresets();
-  renderModels();
-  renderTools();
-  renderMemory();
-  renderLogs();
+  await renderPresets();
+  await renderModels();
+  await renderTools();
+  await renderMemory();
+  await renderLogs();
   document.getElementById("settingsJson").value = JSON.stringify(config, null, 2);
 }
 
@@ -52,6 +114,26 @@ function summarizeStatus(status) {
   const model = status.agent?.config?.model || "no model";
   const modelOk = status.agent?.model_health?.ok ? "model ready" : "model unavailable";
   return `${online} | ${model} | ${modelOk}`;
+}
+
+function renderStatusPills(status) {
+  const caps = status.capabilities || [];
+  const internet = caps.find((cap) => cap.name === "internet");
+  const llama = caps.find((cap) => cap.name === "llama_server_binary");
+  const localModel = status.agent?.model_health;
+  statusPills.innerHTML = "";
+  statusPills.append(
+    pill(internet?.available ? "Online" : "Offline", internet?.available ? "good" : "off"),
+    pill(localModel?.ok ? "Model ready" : "Model off", localModel?.ok ? "good" : "off"),
+    pill(llama?.available ? "llama found" : "llama missing", llama?.available ? "good" : "off")
+  );
+}
+
+function pill(text, kind = "") {
+  const item = document.createElement("span");
+  item.className = `status-pill ${kind}`;
+  item.textContent = text;
+  return item;
 }
 
 function fillForms() {
@@ -70,8 +152,7 @@ function fillForms() {
   setDottedForm("providersForm", config);
   setDottedForm("phoneSettings", config);
   setDottedForm("telegramSettings", config);
-  const allowed = document.querySelector("#telegramSettings [name='telegram.allowed_user_ids']");
-  allowed.value = (config.telegram.allowed_user_ids || []).join(",");
+  document.querySelector("#telegramSettings [name='telegram.allowed_user_ids']").value = (config.telegram.allowed_user_ids || []).join(",");
 }
 
 function setFormValues(formId, values) {
@@ -121,15 +202,53 @@ function setDotted(target, path, value) {
 }
 
 function coerce(value) {
-  if (value === "") return null;
+  if (value === "") return "";
   if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
   return value;
 }
 
-async function savePatch(patch) {
+async function savePatch(patch, message = "Saved") {
   config = await api("/api/settings", { method: "POST", body: JSON.stringify(patch) });
   document.getElementById("settingsJson").value = JSON.stringify(config, null, 2);
   await refreshAll();
+  return { ok: true, message };
+}
+
+function makeRow(title, meta, controls = [], body = "") {
+  const row = document.createElement("div");
+  row.className = "row";
+  const content = document.createElement("div");
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  const small = document.createElement("small");
+  small.textContent = meta || "";
+  content.append(heading, small);
+  if (body) {
+    const bodyNode = document.createElement("div");
+    bodyNode.className = "subline";
+    bodyNode.textContent = body;
+    content.appendChild(bodyNode);
+  }
+  const actions = document.createElement("div");
+  controls.forEach((control) => actions.appendChild(control));
+  row.append(content, actions);
+  return row;
+}
+
+function badge(text, off = false) {
+  const item = document.createElement("span");
+  item.className = `badge ${off ? "off" : ""}`;
+  item.textContent = text;
+  return item;
+}
+
+function button(text, handler, primary = false) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.textContent = text;
+  if (primary) item.classList.add("primary-action");
+  item.addEventListener("click", handler);
+  return item;
 }
 
 document.getElementById("chatForm").addEventListener("submit", async (event) => {
@@ -139,7 +258,11 @@ document.getElementById("chatForm").addEventListener("submit", async (event) => 
   if (!message) return;
   addMessage("user", message);
   input.value = "";
-  const result = await api("/api/chat", { method: "POST", body: JSON.stringify({ message, session_id: "web" }) });
+  const result = await runAction(
+    "Chat",
+    () => api("/api/chat", { method: "POST", body: JSON.stringify({ message, session_id: "web" }) }),
+    "Reply ready"
+  );
   addMessage("assistant", result.reply || result.error || "");
 });
 
@@ -157,24 +280,16 @@ async function renderModels() {
   renderLlamaStatus(data.llama_server);
   const list = document.getElementById("modelsList");
   list.innerHTML = "";
+  if (!data.models.length) {
+    list.appendChild(makeRow("Model vault empty", "no GGUF files"));
+  }
   data.models.forEach((model) => {
-    const row = document.createElement("div");
-    row.className = "row";
-    row.innerHTML = `<div><strong>${model.name}</strong><small>${model.size_mb} MB ${model.loadable ? "" : "(.guff typo)"}</small></div>`;
-    const controls = document.createElement("div");
-    const badge = document.createElement("span");
-    badge.className = `badge ${model.active ? "" : "off"}`;
-    badge.textContent = model.active ? "active" : "idle";
-    const button = document.createElement("button");
-    button.textContent = "Select";
-    button.disabled = !model.loadable;
-    button.addEventListener("click", async () => {
-      await api("/api/models/select", { method: "POST", body: JSON.stringify({ model_name: model.name }) });
+    const select = button("Select", async () => {
+      await runAction("Model", () => api("/api/models/select", { method: "POST", body: JSON.stringify({ model_name: model.name }) }), "Model selected");
       await refreshAll();
     });
-    controls.append(badge, button);
-    row.appendChild(controls);
-    list.appendChild(row);
+    select.disabled = !model.loadable;
+    list.appendChild(makeRow(model.name, `${model.size_mb} MB ${model.loadable ? "" : "(.guff typo)"}`, [badge(model.active ? "active" : "idle", !model.active), select]));
   });
   output("modelOutput", data.health);
 }
@@ -205,13 +320,17 @@ function renderLlamaStatus(status) {
     return;
   }
   const found = status.available ? `found: ${status.resolved}` : "not found";
-  node.textContent = `llama-server ${found}. Checked PATH and ~/llama.cpp/build/bin/llama-server. Current setting: ${status.configured}.`;
+  node.textContent = `llama-server ${found}. Current setting: ${status.configured}.`;
 }
 
-document.getElementById("scanModels").addEventListener("click", renderModels);
-document.getElementById("restartModel").addEventListener("click", async () => output("modelOutput", await api("/api/models/restart", { method: "POST" })));
+document.getElementById("scanModels").addEventListener("click", () => runAction("Models", renderModels, "Models scanned"));
+document.getElementById("restartModel").addEventListener("click", async () => {
+  const result = await runAction("Model server", () => api("/api/models/restart", { method: "POST" }), "Restart requested");
+  output("modelOutput", result);
+});
 document.getElementById("detectLlama").addEventListener("click", async () => {
-  output("modelOutput", await api("/api/models/llama/use-detected", { method: "POST" }));
+  const result = await runAction("llama-server", () => api("/api/models/llama/use-detected", { method: "POST" }), "Path saved");
+  output("modelOutput", result);
   await refreshAll();
 });
 document.getElementById("modelDownload").addEventListener("submit", async (event) => {
@@ -223,30 +342,33 @@ document.getElementById("modelDownload").addEventListener("submit", async (event
     filename: form.filename.value,
     select: form.select.checked,
   };
-  output("downloadOutput", "Downloading. Keep this page open.");
-  const result = await api("/api/models/download", { method: "POST", body: JSON.stringify(payload) });
+  output("downloadOutput", "Download in progress.");
+  const result = await runAction("Model download", () => api("/api/models/download", { method: "POST", body: JSON.stringify(payload) }), "Download complete");
   output("downloadOutput", result);
   await refreshAll();
 });
 document.getElementById("modelSettings").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  await savePatch({
-    model: {
-      models_dir: form.models_dir.value,
-      base_url: form.base_url.value,
-      llama_server_path: form.llama_server_path.value,
-      context_size: Number(form.context_size.value),
-      threads: Number(form.threads.value),
-      temperature: Number(form.temperature.value),
-      top_p: Number(form.top_p.value),
-      thinking_mode: form.thinking_mode.value,
-    },
-  });
+  await runAction("Model settings", () =>
+    savePatch({
+      model: {
+        models_dir: form.models_dir.value,
+        base_url: form.base_url.value,
+        llama_server_path: form.llama_server_path.value,
+        context_size: Number(form.context_size.value),
+        threads: Number(form.threads.value),
+        temperature: Number(form.temperature.value),
+        top_p: Number(form.top_p.value),
+        thinking_mode: form.thinking_mode.value,
+      },
+    })
+  );
 });
 document.getElementById("modelTest").addEventListener("submit", async (event) => {
   event.preventDefault();
-  output("modelOutput", await api("/api/models/test", { method: "POST", body: JSON.stringify({ message: event.currentTarget.message.value }) }));
+  const result = await runAction("Model test", () => api("/api/models/test", { method: "POST", body: JSON.stringify({ message: event.currentTarget.message.value }) }), "Test complete");
+  output("modelOutput", result);
 });
 
 async function renderTools() {
@@ -256,22 +378,11 @@ async function renderTools() {
   list.innerHTML = "";
   select.innerHTML = "";
   data.tools.forEach((tool) => {
-    const row = document.createElement("div");
-    row.className = "row";
-    row.innerHTML = `<div><strong>${tool.name}</strong><small>${tool.provider} | ${tool.risk} | ${tool.details}</small></div>`;
-    const controls = document.createElement("div");
-    const badge = document.createElement("span");
-    badge.className = `badge ${tool.available ? "" : "off"}`;
-    badge.textContent = tool.available ? "available" : "off";
-    const toggle = document.createElement("button");
-    toggle.textContent = tool.enabled ? "Disable" : "Enable";
-    toggle.addEventListener("click", async () => {
-      await api(`/api/tools/${tool.name}/enabled`, { method: "POST", body: JSON.stringify({ enabled: !tool.enabled }) });
+    const toggle = button(tool.enabled ? "Disable" : "Enable", async () => {
+      await runAction("Tool", () => api(`/api/tools/${tool.name}/enabled`, { method: "POST", body: JSON.stringify({ enabled: !tool.enabled }) }), "Tool updated");
       await refreshAll();
     });
-    controls.append(badge, toggle);
-    row.appendChild(controls);
-    list.appendChild(row);
+    list.appendChild(makeRow(tool.name, `${tool.provider} | ${tool.risk} | ${tool.details}`, [badge(tool.available ? "available" : "off", !tool.available), toggle]));
     const option = document.createElement("option");
     option.value = tool.name;
     option.textContent = tool.name;
@@ -282,46 +393,47 @@ async function renderTools() {
 document.getElementById("toolRun").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  const payload = JSON.parse(form.payload.value || "{}");
-  output("toolOutput", await api(`/api/tools/${form.tool.value}/run`, { method: "POST", body: JSON.stringify({ payload }) }));
+  let payload = {};
+  try {
+    payload = JSON.parse(form.payload.value || "{}");
+  } catch {
+    showToast("Tool", "Payload must be valid JSON.", "error");
+    return;
+  }
+  const result = await runAction("Tool", () => api(`/api/tools/${form.tool.value}/run`, { method: "POST", body: JSON.stringify({ payload }) }), "Tool finished");
+  output("toolOutput", result);
 });
 
 async function renderMemory() {
   const data = await api("/api/memory");
   const list = document.getElementById("memoryList");
   list.innerHTML = "";
+  if (!data.memories.length) {
+    list.appendChild(makeRow("No memories yet", "empty store"));
+  }
   data.memories.forEach((memory) => {
-    const row = document.createElement("div");
-    row.className = "row";
-    row.innerHTML = `<div><strong>${memory.source || "memory"}</strong><small>${memory.tags || ""}</small><div>${memory.content.slice(0, 320)}</div></div>`;
-    const button = document.createElement("button");
-    button.textContent = "Forget";
-    button.addEventListener("click", async () => {
-      await api(`/api/memory/${memory.id}`, { method: "DELETE" });
+    const forget = button("Forget", async () => {
+      await runAction("Memory", () => api(`/api/memory/${memory.id}`, { method: "DELETE" }), "Memory removed");
       await renderMemory();
     });
-    row.appendChild(button);
-    list.appendChild(row);
+    list.appendChild(makeRow(memory.source || "memory", memory.tags || "", [forget], memory.content.slice(0, 320)));
   });
 }
 
 document.getElementById("memorySearch").addEventListener("submit", async (event) => {
   event.preventDefault();
   const q = encodeURIComponent(event.currentTarget.q.value);
-  const data = await api(`/api/memory/search?q=${q}`);
+  const data = await runAction("Memory search", () => api(`/api/memory/search?q=${q}`), "Search complete");
   const list = document.getElementById("memoryList");
   list.innerHTML = "";
-  data.results.forEach((memory) => {
-    const row = document.createElement("div");
-    row.className = "row";
-    row.innerHTML = `<div><strong>${memory.source}</strong><small>${memory.tags}</small><div>${memory.content}</div></div>`;
-    list.appendChild(row);
+  (data.results || []).forEach((memory) => {
+    list.appendChild(makeRow(memory.source, memory.tags, [], memory.content));
   });
 });
 document.getElementById("memoryAdd").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  await api("/api/memory", { method: "POST", body: JSON.stringify({ content: form.content.value, tags: form.tags.value }) });
+  await runAction("Memory", () => api("/api/memory", { method: "POST", body: JSON.stringify({ content: form.content.value, tags: form.tags.value }) }), "Memory added");
   form.reset();
   await renderMemory();
 });
@@ -329,26 +441,37 @@ document.getElementById("memoryAdd").addEventListener("submit", async (event) =>
 document.getElementById("fileSettings").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  await savePatch({ files: { allowed_dirs: form.allowed_dirs.value.split(/\n+/).map((x) => x.trim()).filter(Boolean), max_read_mb: Number(form.max_read_mb.value) } });
+  await runAction("Files", () =>
+    savePatch({
+      files: {
+        allowed_dirs: form.allowed_dirs.value.split(/\n+/).map((x) => x.trim()).filter(Boolean),
+        max_read_mb: Number(form.max_read_mb.value),
+      },
+    })
+  );
 });
 document.getElementById("fileRead").addEventListener("submit", async (event) => {
   event.preventDefault();
   const submitter = event.submitter;
   const path = event.currentTarget.path.value;
-  const tool = submitter.value === "list" ? "list_files" : submitter.value === "index" ? "index_file" : "read_file";
-  output("fileOutput", await api(`/api/tools/${tool}/run`, { method: "POST", body: JSON.stringify({ payload: { path } }) }));
+  const tool = submitter?.value === "list" ? "list_files" : submitter?.value === "index" ? "index_file" : "read_file";
+  const result = await runAction("Files", () => api(`/api/tools/${tool}/run`, { method: "POST", body: JSON.stringify({ payload: { path } }) }), "File action complete");
+  output("fileOutput", result);
 });
 
 document.getElementById("providersForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  await savePatch(patchFromDottedForm("providersForm"));
+  await runAction("Providers", () => savePatch(patchFromDottedForm("providersForm")));
 });
 document.getElementById("phoneSettings").addEventListener("submit", async (event) => {
   event.preventDefault();
-  await savePatch(patchFromDottedForm("phoneSettings"));
+  await runAction("Phone settings", () => savePatch(patchFromDottedForm("phoneSettings")));
 });
-document.querySelectorAll("[data-phone-tool]").forEach((button) => {
-  button.addEventListener("click", async () => output("phoneOutput", await api(`/api/tools/${button.dataset.phoneTool}/run`, { method: "POST", body: JSON.stringify({ payload: {} }) })));
+document.querySelectorAll("[data-phone-tool]").forEach((item) => {
+  item.addEventListener("click", async () => {
+    const result = await runAction("Phone", () => api(`/api/tools/${item.dataset.phoneTool}/run`, { method: "POST", body: JSON.stringify({ payload: {} }) }), "Phone action complete");
+    output("phoneOutput", result);
+  });
 });
 document.getElementById("phoneAction").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -364,7 +487,8 @@ document.getElementById("phoneAction").addEventListener("submit", async (event) 
     op: form.op.value,
     mode: form.mode.value,
   };
-  output("phoneOutput", await api(`/api/tools/${form.tool.value}/run`, { method: "POST", body: JSON.stringify({ payload }) }));
+  const result = await runAction("Phone", () => api(`/api/tools/${form.tool.value}/run`, { method: "POST", body: JSON.stringify({ payload }) }), "Phone action complete");
+  output("phoneOutput", result);
 });
 
 document.getElementById("telegramSettings").addEventListener("submit", async (event) => {
@@ -374,9 +498,12 @@ document.getElementById("telegramSettings").addEventListener("submit", async (ev
     .split(",")
     .map((x) => Number(x.trim()))
     .filter((x) => Number.isFinite(x) && x > 0);
-  await savePatch(patch);
+  await runAction("Telegram", () => savePatch(patch));
 });
-document.getElementById("telegramPoll").addEventListener("click", async () => output("telegramOutput", await api("/api/telegram/poll_once", { method: "POST" })));
+document.getElementById("telegramPoll").addEventListener("click", async () => {
+  const result = await runAction("Telegram", () => api("/api/telegram/poll_once", { method: "POST" }), "Poll complete");
+  output("telegramOutput", result);
+});
 
 async function renderLogs() {
   output("logsOutput", await api("/api/logs"));
@@ -384,14 +511,18 @@ async function renderLogs() {
 
 document.getElementById("settingsForm").addEventListener("submit", async (event) => {
   event.preventDefault();
+  let patch = {};
   try {
-    await savePatch(JSON.parse(document.getElementById("settingsJson").value));
-    output("settingsOutput", "Saved");
-  } catch (error) {
-    output("settingsOutput", String(error));
+    patch = JSON.parse(document.getElementById("settingsJson").value);
+  } catch {
+    showToast("Settings", "JSON is invalid.", "error");
+    return;
   }
+  const result = await runAction("Settings", () => savePatch(patch));
+  output("settingsOutput", result);
 });
 
 refreshAll().catch((error) => {
-  statusLine.textContent = String(error);
+  statusLine.textContent = String(error.message || error);
+  showToast("Startup", String(error.message || error), "error");
 });

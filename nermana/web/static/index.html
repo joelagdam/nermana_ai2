@@ -7,37 +7,47 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
+    <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="true"></div>
+    <div class="drawer-backdrop" id="drawerBackdrop"></div>
     <div class="app">
       <aside class="rail">
-        <div class="brand">Nermana</div>
-        <nav id="nav">
-          <button data-page="chat" class="active">Chat</button>
-          <button data-page="models">Models</button>
-          <button data-page="tools">Tools</button>
-          <button data-page="memory">Memory</button>
-          <button data-page="files">Files</button>
-          <button data-page="providers">Providers</button>
-          <button data-page="phone">Phone</button>
-          <button data-page="telegram">Telegram</button>
-          <button data-page="logs">Logs</button>
-          <button data-page="settings">Settings</button>
+        <div class="brand">
+          <img src="/static/mark.svg" alt="" />
+          <div>
+            <strong>Nermana</strong>
+            <span>offline rank console</span>
+          </div>
+        </div>
+        <nav id="nav" class="tab-nav" aria-label="Main tabs">
+          <button data-page="chat" class="active"><span></span>Chat</button>
+          <button data-page="models"><span></span>Models</button>
+          <button data-page="tools"><span></span>Tools</button>
+          <button data-page="memory"><span></span>Memory</button>
+          <button data-page="files"><span></span>Files</button>
+          <button data-page="providers"><span></span>Providers</button>
+          <button data-page="phone"><span></span>Phone</button>
+          <button data-page="telegram"><span></span>Telegram</button>
+          <button data-page="logs"><span></span>Logs</button>
+          <button data-page="settings"><span></span>Settings</button>
         </nav>
       </aside>
 
       <main>
         <header class="topbar">
+          <button id="drawerButton" class="icon-button" aria-label="Open menu"><span></span><span></span><span></span></button>
           <div>
             <h1 id="pageTitle">Chat</h1>
             <p id="statusLine">Loading status</p>
           </div>
-          <button id="refreshButton">Refresh</button>
+          <div class="status-pills" id="statusPills"></div>
+          <button id="refreshButton" class="primary-action">Refresh</button>
         </header>
 
         <section id="chat" class="page active">
           <div id="chatLog" class="chat-log"></div>
           <form id="chatForm" class="composer">
             <input id="chatInput" name="message" autocomplete="off" placeholder="Ask Nermana" />
-            <button>Send</button>
+            <button class="primary-action">Send</button>
           </form>
         </section>
 
@@ -56,7 +66,7 @@
             <label>Direct GGUF link <input name="url" placeholder="https://...model.gguf" /></label>
             <label>Save as <input name="filename" placeholder="optional-name.gguf" /></label>
             <label>Select after download <input name="select" type="checkbox" checked /></label>
-            <button>Download Model</button>
+            <button class="primary-action">Download Model</button>
           </form>
           <form id="modelSettings" class="grid-form">
             <label>Models folder <input name="models_dir" placeholder="models" /></label>
@@ -73,7 +83,7 @@
                 <option value="think">think</option>
               </select>
             </label>
-            <button>Save Model Settings</button>
+            <button class="primary-action">Save Model Settings</button>
           </form>
           <form id="modelTest" class="inline-form">
             <input name="message" placeholder="Model test prompt" />
@@ -101,7 +111,7 @@
           <form id="memoryAdd" class="stack-form">
             <textarea name="content" placeholder="Memory text"></textarea>
             <input name="tags" placeholder="tags" />
-            <button>Add Memory</button>
+            <button class="primary-action">Add Memory</button>
           </form>
           <div id="memoryList" class="list"></div>
         </section>
@@ -110,7 +120,7 @@
           <form id="fileSettings" class="stack-form">
             <textarea name="allowed_dirs" spellcheck="false"></textarea>
             <label>Max read MB <input name="max_read_mb" type="number" min="1" /></label>
-            <button>Save File Settings</button>
+            <button class="primary-action">Save File Settings</button>
           </form>
           <form id="fileRead" class="inline-form">
             <input name="path" placeholder="Allowed file or folder path" />
@@ -134,7 +144,7 @@
             <label>Vision enabled <input name="providers.vision_enabled" type="checkbox" /></label>
             <label>Vision endpoint <input name="providers.vision_endpoint" /></label>
             <label>Vision key <input name="providers.vision_api_key" /></label>
-            <button>Save Providers</button>
+            <button class="primary-action">Save Providers</button>
           </form>
         </section>
 
@@ -150,7 +160,7 @@
                 <option value="power">power</option>
               </select>
             </label>
-            <button>Save Phone Settings</button>
+            <button class="primary-action">Save Phone Settings</button>
           </form>
           <div class="toolbar">
             <button data-phone-tool="phone_status">Status</button>
@@ -174,7 +184,7 @@
               <option value="settings_get">settings_get</option>
               <option value="settings_put">settings_put</option>
             </select>
-            <button>Run Phone Action</button>
+            <button class="primary-action">Run Phone Action</button>
           </form>
           <pre id="phoneOutput"></pre>
         </section>
@@ -184,7 +194,7 @@
             <label>Enabled <input name="telegram.enabled" type="checkbox" /></label>
             <label>Token <input name="telegram.token" /></label>
             <label>Allowed user IDs <input name="telegram.allowed_user_ids" /></label>
-            <button>Save Telegram</button>
+            <button class="primary-action">Save Telegram</button>
           </form>
           <button id="telegramPoll">Poll Once</button>
           <pre id="telegramOutput"></pre>
@@ -197,7 +207,7 @@
         <section id="settings" class="page">
           <form id="settingsForm" class="stack-form">
             <textarea id="settingsJson" spellcheck="false"></textarea>
-            <button>Save JSON</button>
+            <button class="primary-action">Save JSON</button>
           </form>
           <pre id="settingsOutput"></pre>
         </section>

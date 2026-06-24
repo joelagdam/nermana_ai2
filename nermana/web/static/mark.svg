@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="Nermana mark">
+  <defs>
+    <linearGradient id="edge" x1="8" x2="88" y1="16" y2="80" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6a38ff"/>
+      <stop offset=".48" stop-color="#00a6d6"/>
+      <stop offset="1" stop-color="#f0a41a"/>
+    </linearGradient>
+  </defs>
+  <path fill="#f8fbff" d="M48 4 86 22v36L48 92 10 58V22L48 4Z"/>
+  <path fill="none" stroke="url(#edge)" stroke-width="5" stroke-linejoin="round" d="M48 8 82 24v32L48 86 14 56V24L48 8Z"/>
+  <path fill="#181d2f" d="M50 20 27 50h17l-3 25 28-36H51l-1-19Z"/>
+  <path fill="#00a6d6" d="M51 20 44 50h17L41 75l3-25H27l23-30h1Z" opacity=".78"/>
+</svg>
