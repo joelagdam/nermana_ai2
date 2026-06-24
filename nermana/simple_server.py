@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import mimetypes
 from http import HTTPStatus
@@ -28,7 +29,15 @@ class SimpleNermanaServer:
         class Handler(NermanaHandler):
             server_state = outer
 
-        httpd = ThreadingHTTPServer((host, port), Handler)
+        try:
+            httpd = ThreadingHTTPServer((host, port), Handler)
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                print(f"web: {host}:{port} is already in use")
+                print("web: stop the existing Nermana process with: pkill -f nermana")
+                print("web: example: NERMANA_PORT=8766 sh scripts/termux_start_all.sh")
+                raise SystemExit(98) from exc
+            raise
         print(f"Nermana running on http://{host}:{port}")
         httpd.serve_forever()
 

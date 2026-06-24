@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import signal
 import threading
 from typing import Any
@@ -13,8 +14,20 @@ from .telegram_bot import TelegramBot
 class StartupManager:
     def __init__(self):
         self.agent = AgentCore(load_config())
+        self.web_host, self.web_port = self._server_binding()
         self.telegram_thread: threading.Thread | None = None
         self.model_started = False
+
+    def _server_binding(self) -> tuple[str, int]:
+        host = os.environ.get("NERMANA_HOST") or self.agent.config.server.host
+        port_text = os.environ.get("NERMANA_PORT")
+        port = self.agent.config.server.port
+        if port_text:
+            try:
+                port = int(port_text)
+            except ValueError as exc:
+                raise SystemExit(f"invalid NERMANA_PORT: {port_text}") from exc
+        return host, port
 
     def start(self) -> None:
         self._select_first_model_if_needed()
@@ -58,8 +71,8 @@ class StartupManager:
         print("telegram: polling")
 
     def _serve_web(self) -> None:
-        host = self.agent.config.server.host
-        port = self.agent.config.server.port
+        host = self.web_host
+        port = self.web_port
         server = SimpleNermanaServer(self.agent)
         self._install_signal_handlers()
         print("web: starting")

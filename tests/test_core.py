@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import errno
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -11,6 +13,8 @@ from nermana.model_downloads import download_model, list_presets
 from nermana.memory import MemoryStore
 from nermana.models import ModelManager
 from nermana.safety import DecisionGate
+from nermana.simple_server import SimpleNermanaServer
+from nermana.startup import StartupManager
 from nermana.tooling import Tool, ToolRegistry
 from nermana.tools.files import register_file_tools
 from nermana.tools.search import register_search_tools
@@ -147,6 +151,29 @@ class AgentTests(unittest.TestCase):
             self.assertIn("save that to memory", result["reply"].lower())
             saved = agent.chat("yes", session_id="mem")
             self.assertIn("Saved to memory", saved["reply"])
+
+
+class StartupTests(unittest.TestCase):
+    def test_startup_reads_server_env_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            env = {"NERMANA_HOST": "0.0.0.0", "NERMANA_PORT": "8766"}
+            with patch.dict(os.environ, env), patch("nermana.startup.load_config", return_value=cfg):
+                manager = StartupManager()
+            self.assertEqual(manager.web_host, "0.0.0.0")
+            self.assertEqual(manager.web_port, 8766)
+            self.assertEqual(manager.agent.config.server.host, "127.0.0.1")
+            self.assertEqual(manager.agent.config.server.port, 8765)
+
+    def test_simple_server_reports_occupied_port_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            server = SimpleNermanaServer(AgentCore(cfg))
+            error = OSError(errno.EADDRINUSE, "Address already in use")
+            with patch("nermana.simple_server.ThreadingHTTPServer", side_effect=error):
+                with self.assertRaises(SystemExit) as raised:
+                    server.serve("127.0.0.1", 8765)
+            self.assertEqual(raised.exception.code, 98)
 
 
 if __name__ == "__main__":
