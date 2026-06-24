@@ -167,6 +167,11 @@ class MemoryStore:
             rows = conn.execute("SELECT * FROM memories ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
+    def count_memories(self) -> int:
+        with self.connection() as conn:
+            row = conn.execute("SELECT COUNT(*) AS total FROM memories").fetchone()
+        return int(row["total"] if row else 0)
+
     def forget(self, memory_id: int) -> bool:
         with self.connection() as conn:
             cursor = conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))

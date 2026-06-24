@@ -19,7 +19,8 @@
           </div>
         </div>
         <nav id="nav" class="tab-nav" aria-label="Main tabs">
-          <button data-page="chat" class="active"><span></span>Chat</button>
+          <button data-page="dashboard" class="active"><span></span>Dashboard</button>
+          <button data-page="chat"><span></span>Chat</button>
           <button data-page="models"><span></span>Models</button>
           <button data-page="tools"><span></span>Tools</button>
           <button data-page="memory"><span></span>Memory</button>
@@ -36,14 +37,58 @@
         <header class="topbar">
           <button id="drawerButton" class="icon-button" aria-label="Open menu"><span></span><span></span><span></span></button>
           <div>
-            <h1 id="pageTitle">Chat</h1>
+            <h1 id="pageTitle">Dashboard</h1>
             <p id="statusLine">Loading status</p>
           </div>
           <div class="status-pills" id="statusPills"></div>
           <button id="refreshButton" class="primary-action">Refresh</button>
         </header>
 
-        <section id="chat" class="page active">
+        <section id="dashboard" class="page active">
+          <div class="dashboard-hero">
+            <div>
+              <p class="eyebrow">System overview</p>
+              <h2>Nermana control center</h2>
+              <p id="dashboardSummary">Loading working indicators and stats.</p>
+            </div>
+            <div class="rank-readout">
+              <strong id="dashboardWorkingCount">0/0</strong>
+              <span>working</span>
+            </div>
+          </div>
+          <div id="dashboardStats" class="metric-grid"></div>
+          <div class="dashboard-actions">
+            <button type="button" data-jump="chat">Open Chat</button>
+            <button type="button" data-jump="models">Models</button>
+            <button type="button" data-jump="tools">Tools</button>
+            <button type="button" data-jump="providers">Providers</button>
+          </div>
+          <div class="dashboard-layout">
+            <section class="dashboard-panel">
+              <div class="panel-heading">
+                <h3>Working Indicators</h3>
+                <span id="workerHealthLabel">Checking</span>
+              </div>
+              <div id="workerList" class="worker-list"></div>
+            </section>
+            <section class="dashboard-panel">
+              <div class="panel-heading">
+                <h3>Recent Activity</h3>
+                <span id="dashboardGeneratedAt">Live</span>
+              </div>
+              <div id="activityList" class="activity-list"></div>
+            </section>
+            <section class="dashboard-panel">
+              <div class="panel-heading">
+                <h3>Downloads</h3>
+                <span id="downloadHealthLabel">Idle</span>
+              </div>
+              <div id="downloadList" class="activity-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="chat" class="page">
           <div id="chatLog" class="chat-log"></div>
           <form id="chatForm" class="composer">
             <input id="chatInput" name="message" autocomplete="off" placeholder="Ask Nermana" />
@@ -69,6 +114,13 @@
             <label>Select after download <input name="select" type="checkbox" checked /></label>
             <button class="primary-action">Download Model</button>
           </form>
+          <div id="downloadProgress" class="progress-panel" hidden>
+            <div>
+              <strong id="downloadProgressTitle">Download</strong>
+              <span id="downloadProgressText">Starting</span>
+            </div>
+            <progress id="downloadProgressBar" max="100" value="0"></progress>
+          </div>
           <form id="modelSettings" class="grid-form">
             <label>Models folder <input name="models_dir" placeholder="models" /></label>
             <label>Base URL <input name="base_url" /></label>
@@ -151,8 +203,16 @@
 
         <section id="providers" class="page">
           <form id="providersForm" class="grid-form">
+            <label>Search provider
+              <select name="search.provider">
+                <option value="duckduckgo">DuckDuckGo</option>
+                <option value="searxng">SearXNG</option>
+                <option value="auto">Auto</option>
+              </select>
+            </label>
             <label>SearXNG URL <input name="search.searxng_url" placeholder="http://127.0.0.1:8888" /></label>
             <label>Search enabled <input name="search.enabled" type="checkbox" /></label>
+            <label>Max results <input name="search.max_results" type="number" min="1" max="10" /></label>
             <label>Weather location <input name="weather.location_name" /></label>
             <label>Latitude <input name="weather.latitude" type="number" step="0.0001" /></label>
             <label>Longitude <input name="weather.longitude" type="number" step="0.0001" /></label>
@@ -164,6 +224,11 @@
             <label>Vision key <input name="providers.vision_api_key" /></label>
             <button class="primary-action">Save Providers</button>
           </form>
+          <form id="searchTest" class="inline-form">
+            <input name="query" placeholder="Test web search" />
+            <button>Search</button>
+          </form>
+          <pre id="searchOutput"></pre>
         </section>
 
         <section id="phone" class="page">

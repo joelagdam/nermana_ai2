@@ -198,11 +198,12 @@ class AgentCore:
     def _capability_context(self) -> str:
         active_tools = [tool for tool in self.tools.list_metadata() if tool.get("enabled") and tool.get("available")]
         llama = self.models.llama_server_status()
+        search_configured = self.config.search.provider != "searxng" or bool(self.config.search.searxng_url)
         cap_lines = [
             f"- active_model: {self.config.model.active_model or 'none'}",
             f"- llama_server_binary: {'active' if llama.get('available') else 'inactive'} ({llama.get('resolved') or llama.get('configured')})",
             f"- weather_default_city: {self.config.weather.location_name}",
-            f"- search_provider: {self.config.search.provider} {'configured' if self.config.search.searxng_url else 'not configured'}",
+            f"- search_provider: {self.config.search.provider} {'configured' if search_configured else 'fallback available'}",
             f"- image_provider: {'configured' if self.config.providers.image_enabled and self.config.providers.image_endpoint else 'not configured'}",
             f"- vision_provider: {'configured' if self.config.providers.vision_enabled and self.config.providers.vision_endpoint else 'not configured'}",
         ]

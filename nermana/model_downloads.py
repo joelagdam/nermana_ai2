@@ -6,7 +6,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import AppConfig, resolve_path
 
@@ -63,7 +63,16 @@ def get_preset(preset_id: str) -> ModelPreset | None:
     return next((preset for preset in MODEL_PRESETS if preset.id == preset_id), None)
 
 
-def download_model(config: AppConfig, url: str, filename: str = "", select: bool = False) -> dict[str, Any]:
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def download_model(
+    config: AppConfig,
+    url: str,
+    filename: str = "",
+    select: bool = False,
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         return {"ok": False, "error": "Only http and https model links are allowed."}
@@ -77,19 +86,26 @@ def download_model(config: AppConfig, url: str, filename: str = "", select: bool
     models_dir.mkdir(parents=True, exist_ok=True)
     target = models_dir / target_name
     if target.exists() and target.stat().st_size > 0:
+        size = target.stat().st_size
+        _progress(progress, target_name, size, size)
         if select:
             config.model.active_model = target.name
-        return {"ok": True, "skipped": True, "path": str(target), "filename": target.name, "size_bytes": target.stat().st_size}
+        return {"ok": True, "skipped": True, "path": str(target), "filename": target.name, "size_bytes": size, "total_bytes": size}
 
     partial = target.with_suffix(target.suffix + ".part")
     request = urllib.request.Request(url, headers={"User-Agent": "Nermana-Termux/0.1"})
     try:
         with urllib.request.urlopen(request, timeout=30) as response, partial.open("wb") as handle:
+            total = _content_length(response)
+            downloaded = 0
+            _progress(progress, target_name, downloaded, total)
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
                     break
                 handle.write(chunk)
+                downloaded += len(chunk)
+                _progress(progress, target_name, downloaded, total)
         os.replace(partial, target)
     except Exception as exc:
         if partial.exists():
@@ -98,14 +114,16 @@ def download_model(config: AppConfig, url: str, filename: str = "", select: bool
 
     if select:
         config.model.active_model = target.name
-    return {"ok": True, "skipped": False, "path": str(target), "filename": target.name, "size_bytes": target.stat().st_size}
+    size = target.stat().st_size
+    _progress(progress, target_name, size, size)
+    return {"ok": True, "skipped": False, "path": str(target), "filename": target.name, "size_bytes": size, "total_bytes": size}
 
 
-def download_preset(config: AppConfig, preset_id: str, select: bool = True) -> dict[str, Any]:
+def download_preset(config: AppConfig, preset_id: str, select: bool = True, progress: ProgressCallback | None = None) -> dict[str, Any]:
     preset = get_preset(preset_id)
     if preset is None:
         return {"ok": False, "error": f"Unknown preset: {preset_id}"}
-    result = download_model(config, preset.url, preset.filename, select=select)
+    result = download_model(config, preset.url, preset.filename, select=select, progress=progress)
     result["preset"] = asdict(preset)
     if result.get("ok"):
         config.model.context_size = preset.context_size
@@ -116,3 +134,25 @@ def download_preset(config: AppConfig, preset_id: str, select: bool = True) -> d
 def _safe_filename(name: str) -> str:
     name = Path(name).name.strip()
     return FILENAME_RE.sub("_", name)
+
+
+def _content_length(response: Any) -> int:
+    value = response.headers.get("Content-Length", "")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _progress(progress: ProgressCallback | None, filename: str, bytes_read: int, total_bytes: int) -> None:
+    if progress is None:
+        return
+    percent = round((bytes_read / total_bytes) * 100, 1) if total_bytes else 0
+    progress(
+        {
+            "filename": filename,
+            "bytes_read": bytes_read,
+            "total_bytes": total_bytes,
+            "percent": percent,
+        }
+    )

@@ -8,6 +8,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from nermana.agent import AgentCore
+from nermana.capabilities import Capability
 from nermana.config import AppConfig, FileConfig, MemoryConfig, ModelConfig, SafetyConfig, SearchConfig, merge_config, save_config
 from nermana.model_downloads import download_model, list_presets
 from nermana.memory import MemoryStore
@@ -18,6 +19,24 @@ from nermana.startup import StartupManager
 from nermana.tooling import Tool, ToolRegistry
 from nermana.tools.files import register_file_tools
 from nermana.tools.search import register_search_tools
+
+
+class FakeUrlResponse:
+    def __init__(self, chunks: list[bytes], headers: dict[str, str] | None = None):
+        self.chunks = chunks
+        self.headers = headers or {}
+        self.status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        return False
+
+    def read(self, _size: int = -1) -> bytes:
+        if not self.chunks:
+            return b""
+        return self.chunks.pop(0)
 
 
 class ConfigTests(unittest.TestCase):
@@ -65,6 +84,18 @@ class ModelTests(unittest.TestCase):
             self.assertFalse(download_model(cfg, "https://example.com/model.bin")["ok"])
             self.assertTrue(any(preset["id"] == "qwen25_15b_instruct_q4" for preset in list_presets()))
 
+    def test_model_download_reports_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(model=ModelConfig(models_dir=str(Path(tmp) / "models")))
+            updates = []
+            response = FakeUrlResponse([b"ab", b"cde", b""], {"Content-Length": "5"})
+            with patch("urllib.request.urlopen", return_value=response):
+                result = download_model(cfg, "https://example.com/model.gguf", progress=updates.append)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["size_bytes"], 5)
+            self.assertEqual(updates[-1]["bytes_read"], 5)
+            self.assertEqual(updates[-1]["percent"], 100)
+
     def test_llama_command_uses_fast_phone_settings(self) -> None:
         cfg = AppConfig(model=ModelConfig(threads=0, batch_size=256, ubatch_size=64, parallel_slots=1, mlock=True, no_mmap=True))
         manager = ModelManager(cfg, persist=False)
@@ -82,6 +113,7 @@ class MemoryTests(unittest.TestCase):
             memory_id = store.remember("The preferred nickname is Kent.", tags="profile", source="test")
             hits = store.search("nickname")
             self.assertTrue(any(hit.id == memory_id for hit in hits))
+            self.assertEqual(store.count_memories(), 1)
             self.assertTrue(store.forget(memory_id))
 
     def test_relative_memory_path_uses_project_root(self) -> None:
@@ -112,12 +144,27 @@ class SafetyTests(unittest.TestCase):
 
 class ToolTests(unittest.TestCase):
     def test_registry_respects_availability_and_safety(self) -> None:
-        cfg = AppConfig(search=SearchConfig(enabled=True, searxng_url=""))
+        cfg = AppConfig(search=SearchConfig(enabled=False))
         registry = ToolRegistry(cfg)
         register_search_tools(registry, cfg)
         result = registry.run("web_search", {"query": "hello"})
         self.assertFalse(result["ok"])
         self.assertIn("unavailable", result["error"])
+
+    def test_duckduckgo_search_provider_parses_results(self) -> None:
+        html = b"""
+        <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage">Example result</a>
+        <div class="result__snippet">Useful snippet text.</div>
+        """
+        cfg = AppConfig(search=SearchConfig(enabled=True, provider="duckduckgo", max_results=3))
+        registry = ToolRegistry(cfg)
+        register_search_tools(registry, cfg)
+        with patch("urllib.request.urlopen", return_value=FakeUrlResponse([html])):
+            result = registry.run("web_search", {"query": "hello"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["provider"], "duckduckgo")
+        self.assertEqual(result["results"][0]["url"], "https://example.com/page")
+        self.assertIn("Useful snippet", result["results"][0]["content"])
 
     def test_file_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -192,6 +239,31 @@ class StartupTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as raised:
                     server.serve("127.0.0.1", 8765)
             self.assertEqual(raised.exception.code, 98)
+
+
+class DashboardTests(unittest.TestCase):
+    def test_dashboard_snapshot_reports_workers_and_stats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            agent.memory.remember("Dashboard memory", tags="test", source="unit")
+            server = SimpleNermanaServer(agent)
+            caps = [
+                Capability("internet", True, "network probe"),
+                Capability("local_model", False, "not running"),
+                Capability("llama_server_binary", True, "llama-server"),
+                Capability("termux_api", False, "missing"),
+                Capability("shizuku_rish", False, "missing"),
+                Capability("image_provider", False, "not configured"),
+                Capability("vision_provider", False, "not configured"),
+                Capability("telegram", False, "missing token"),
+            ]
+            with patch("nermana.simple_server.collect_capabilities", return_value=caps):
+                snapshot = server.dashboard_snapshot()
+            self.assertTrue(snapshot["ok"])
+            self.assertGreaterEqual(snapshot["stats"]["workers_total"], 1)
+            self.assertEqual(snapshot["stats"]["memories"], 1)
+            self.assertTrue(any(worker["name"] == "Internet" for worker in snapshot["workers"]))
 
 
 if __name__ == "__main__":

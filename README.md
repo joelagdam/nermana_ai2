@@ -11,7 +11,7 @@ The Termux setup does not run `pip install`. It uses standard-library Python for
 - Local ADK-style agent core with memory, tools, settings, and safety checks.
 - Web UI for chat, `.gguf` model switching, providers, files, phone tools, Telegram, logs, and raw settings.
 - Local model adapter for `llama.cpp` server at `http://127.0.0.1:8080/v1`.
-- Online search through a configured SearXNG JSON endpoint.
+- Online search through DuckDuckGo by default, or an optional SearXNG JSON endpoint.
 - Weather through Open-Meteo when online.
 - File reading and memory indexing from approved folders only.
 - Optional image and vision provider endpoints.
@@ -93,7 +93,7 @@ The updater preserves `data/config.json`, `data/`, and `models/`. You can also r
 The Models page is the setup hub:
 
 - Detect and save your existing `llama-server` path from `~/llama.cpp`.
-- Download model presets into `models/`.
+- Download model presets into `models/` with progress.
 - Download any direct `.gguf` link into `models/`.
 - Select the downloaded model.
 - Edit context size, threads, temperature, top-p, thinking mode, and model server URL.
@@ -102,6 +102,8 @@ The Models page is the setup hub:
 - Control semi-automatic tool decisions and confirmation behavior from the Tools page.
 
 Preset downloads require internet on the phone. If the phone is offline, put `.gguf` files in `models/` manually and press Scan Models.
+
+The Providers page can test web search directly. DuckDuckGo works without an API key; choose SearXNG only if you have a reachable SearXNG URL.
 
 ## Phone Control
 

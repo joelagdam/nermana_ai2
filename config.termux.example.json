@@ -65,7 +65,7 @@
   "search": {
     "enabled": true,
     "max_results": 5,
-    "provider": "searxng",
+    "provider": "duckduckgo",
     "safe_search": 1,
     "searxng_url": "",
     "timeout_seconds": 8.0

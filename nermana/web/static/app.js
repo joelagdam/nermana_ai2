@@ -1,5 +1,6 @@
 let config = {};
 let statusCache = {};
+let dashboardCache = {};
 
 const pages = Array.from(document.querySelectorAll(".page"));
 const navButtons = Array.from(document.querySelectorAll("#nav button"));
@@ -21,6 +22,9 @@ navButtons.forEach((button) => {
 drawerButton.addEventListener("click", openDrawer);
 drawerBackdrop.addEventListener("click", closeDrawer);
 document.getElementById("refreshButton").addEventListener("click", () => runAction("Refresh", refreshAll));
+document.querySelectorAll("[data-jump]").forEach((button) => {
+  button.addEventListener("click", () => showPage(button.dataset.jump));
+});
 
 function showPage(id) {
   pages.forEach((page) => page.classList.toggle("active", page.id === id));
@@ -94,12 +98,18 @@ function output(nodeId, value) {
   document.getElementById(nodeId).textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function refreshAll() {
   config = await api("/api/settings");
-  statusCache = await api("/api/status");
+  dashboardCache = await api("/api/dashboard");
+  statusCache = { agent: dashboardCache.agent, capabilities: dashboardCache.capabilities };
   statusLine.textContent = summarizeStatus(statusCache);
   renderStatusPills(statusCache);
   fillForms();
+  renderDashboard(dashboardCache);
   await renderPresets();
   await renderModels();
   await renderTools();
@@ -222,6 +232,132 @@ async function savePatch(patch, message = "Saved") {
   return { ok: true, message };
 }
 
+function renderDashboard(data) {
+  const stats = data.stats || {};
+  const workers = data.workers || [];
+  const working = Number(stats.workers_working || 0);
+  const total = Number(stats.workers_total || workers.length || 0);
+  const model = stats.model || "no model selected";
+  const city = stats.weather_city || "no city";
+  document.getElementById("dashboardSummary").textContent = `${model} | ${city} | ${stats.tools_working || 0}/${stats.tools_total || 0} tools active`;
+  document.getElementById("dashboardWorkingCount").textContent = `${working}/${total}`;
+  document.getElementById("workerHealthLabel").textContent = `${working} working`;
+  document.getElementById("dashboardGeneratedAt").textContent = formatTime(data.generated_at);
+  document.getElementById("downloadHealthLabel").textContent = stats.downloads_active ? `${stats.downloads_active} active` : "Idle";
+  renderDashboardStats(stats);
+  renderWorkers(workers);
+  renderActivity(data);
+  renderDownloads(data.downloads || []);
+}
+
+function renderDashboardStats(stats) {
+  const grid = document.getElementById("dashboardStats");
+  grid.innerHTML = "";
+  grid.append(
+    metric("Workers", `${stats.workers_working || 0}/${stats.workers_total || 0}`, "active capabilities", stats.workers_working ? "good" : "warn"),
+    metric("Tools", `${stats.tools_working || 0}/${stats.tools_total || 0}`, `${stats.tools_enabled || 0} enabled`, stats.tools_working ? "good" : "warn"),
+    metric("Memory", stats.memories || 0, "saved facts", stats.memories ? "good" : ""),
+    metric("Sessions", stats.sessions || 0, "chat histories", stats.sessions ? "good" : ""),
+    metric("Downloads", stats.downloads_active || 0, `${stats.downloads_total || 0} tracked`, stats.downloads_active ? "busy" : ""),
+    metric("Folders", stats.allowed_folders || 0, "file allowlist", stats.allowed_folders ? "good" : "warn")
+  );
+}
+
+function metric(label, value, detail, kind = "") {
+  const item = document.createElement("div");
+  item.className = `metric ${kind}`;
+  const labelNode = document.createElement("span");
+  labelNode.textContent = label;
+  const valueNode = document.createElement("strong");
+  valueNode.textContent = value;
+  const detailNode = document.createElement("small");
+  detailNode.textContent = detail;
+  item.append(labelNode, valueNode, detailNode);
+  return item;
+}
+
+function renderWorkers(workers) {
+  const list = document.getElementById("workerList");
+  list.innerHTML = "";
+  if (!workers.length) {
+    list.appendChild(activityItem("No workers reported", "Dashboard data unavailable."));
+    return;
+  }
+  workers.forEach((worker) => {
+    const item = document.createElement("div");
+    item.className = `worker ${worker.state || "offline"}`;
+    const dot = document.createElement("span");
+    dot.className = "state-dot";
+    const content = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = worker.name || "Worker";
+    const details = document.createElement("small");
+    details.textContent = worker.details || "";
+    content.append(title, details);
+    const state = document.createElement("span");
+    state.className = "state-label";
+    state.textContent = stateLabel(worker.state);
+    item.append(dot, content, state);
+    list.appendChild(item);
+  });
+}
+
+function renderActivity(data) {
+  const list = document.getElementById("activityList");
+  list.innerHTML = "";
+  const sessions = data.recent_sessions || [];
+  const memories = data.recent_memories || [];
+  if (!sessions.length && !memories.length) {
+    list.appendChild(activityItem("No recent activity", "Chat and memory activity will appear here."));
+    return;
+  }
+  sessions.slice(0, 4).forEach((session) => {
+    list.appendChild(activityItem(session.title || session.id || "Session", `updated ${formatTime(session.updated_at)}`));
+  });
+  memories.slice(0, 3).forEach((memory) => {
+    list.appendChild(activityItem(memory.source || "memory", (memory.content || "").slice(0, 120)));
+  });
+}
+
+function renderDownloads(downloads) {
+  const list = document.getElementById("downloadList");
+  list.innerHTML = "";
+  if (!downloads.length) {
+    list.appendChild(activityItem("No model downloads", "Start one from Models when you need a new GGUF."));
+    return;
+  }
+  downloads.forEach((job) => {
+    const title = job.filename || job.id || "model download";
+    const detail = `${job.state || "unknown"} | ${job.percent ? `${Number(job.percent).toFixed(1)}%` : formatTime(job.updated_at)}`;
+    list.appendChild(activityItem(title, detail));
+  });
+}
+
+function activityItem(title, detail) {
+  const item = document.createElement("div");
+  item.className = "activity-item";
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  const small = document.createElement("small");
+  small.textContent = detail || "";
+  item.append(strong, small);
+  return item;
+}
+
+function stateLabel(state) {
+  if (state === "working") return "Working";
+  if (state === "ready") return "Ready";
+  if (state === "busy") return "Busy";
+  if (state === "disabled") return "Disabled";
+  return "Offline";
+}
+
+function formatTime(value) {
+  const number = Number(value || 0);
+  if (!number) return "n/a";
+  return new Date(number * 1000).toLocaleString();
+}
+
 function makeRow(title, meta, controls = [], body = "") {
   const row = document.createElement("div");
   row.className = "row";
@@ -338,11 +474,64 @@ async function renderPresets() {
 }
 
 async function downloadModel(payload) {
-  output("downloadOutput", "Download in progress.");
-  const result = await runAction("Model download", () => api("/api/models/download", { method: "POST", body: JSON.stringify(payload) }), "Download complete");
-  output("downloadOutput", result);
-  await refreshAll();
-  return result;
+  renderDownloadProgress({ state: "queued", message: "Queued", bytes_read: 0, total_bytes: 0, percent: 0 });
+  output("downloadOutput", "Download queued.");
+  const started = await runAction(
+    "Model download",
+    () => api("/api/models/download/start", { method: "POST", body: JSON.stringify(payload) }),
+    "Download started"
+  );
+  if (!started.ok) {
+    output("downloadOutput", started);
+    return started;
+  }
+  let job = started.job;
+  renderDownloadProgress(job);
+  output("downloadOutput", job);
+  while (job && !["complete", "error"].includes(job.state)) {
+    await delay(1000);
+    job = await api(`/api/models/downloads/${started.job_id}`);
+    renderDownloadProgress(job);
+    output("downloadOutput", job);
+  }
+  if (job.state === "complete") {
+    showToast("Model download", "Download complete", "success");
+    await refreshAll();
+  } else {
+    showToast("Model download", job.error || "Download failed", "error");
+  }
+  return job.result || job;
+}
+
+function renderDownloadProgress(job) {
+  const panel = document.getElementById("downloadProgress");
+  const title = document.getElementById("downloadProgressTitle");
+  const text = document.getElementById("downloadProgressText");
+  const bar = document.getElementById("downloadProgressBar");
+  panel.hidden = false;
+  const filename = job.filename || "model";
+  const bytes = `${formatBytes(job.bytes_read || 0)}${job.total_bytes ? ` / ${formatBytes(job.total_bytes)}` : ""}`;
+  const percent = Number(job.percent || 0);
+  title.textContent = `${filename} ${job.state || ""}`.trim();
+  text.textContent = job.total_bytes ? `${percent.toFixed(1)}% | ${bytes}` : `${job.message || "Working"} | ${bytes}`;
+  if (job.total_bytes) {
+    bar.value = Math.max(0, Math.min(100, percent));
+  } else {
+    bar.removeAttribute("value");
+  }
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let size = bytes / 1024;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[index]}`;
 }
 
 function renderLlamaStatus(status) {
@@ -502,6 +691,17 @@ document.getElementById("fileRead").addEventListener("submit", async (event) => 
 document.getElementById("providersForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   await runAction("Providers", () => savePatch(patchFromDottedForm("providersForm")));
+});
+document.getElementById("searchTest").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const query = event.currentTarget.query.value.trim();
+  if (!query) return;
+  const result = await runAction(
+    "Search",
+    () => api("/api/tools/web_search/run", { method: "POST", body: JSON.stringify({ payload: { query } }) }),
+    "Search complete"
+  );
+  output("searchOutput", result);
 });
 document.getElementById("phoneSettings").addEventListener("submit", async (event) => {
   event.preventDefault();
