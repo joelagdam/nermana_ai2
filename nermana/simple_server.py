@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import base64
 import json
 import mimetypes
 import threading
@@ -9,13 +10,14 @@ import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .agent import AgentCore
 from .capabilities import collect_capabilities
 from .config import merge_config, save_config
 from .model_downloads import download_model, download_preset, list_presets
 from .telegram_bot import TelegramBot
+from .tools.files import _safe_path
 from .updater import update_status, update_system
 
 
@@ -310,6 +312,8 @@ class NermanaHandler(BaseHTTPRequestHandler):
                 self._json(TelegramBot(self.agent).status())
             except Exception as exc:
                 self._json({"ok": False, "error": str(exc)})
+        elif path == "/api/files/download":
+            self._download_file(query.get("path", [""])[0])
         else:
             self._json({"ok": False, "error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -360,6 +364,8 @@ class NermanaHandler(BaseHTTPRequestHandler):
             if result.get("ok"):
                 save_config(self.agent.config)
             self._json(result)
+        elif path == "/api/files/upload":
+            self._json(self._upload_file(body))
         elif path.startswith("/api/tools/") and path.endswith("/enabled"):
             tool_name = path.split("/")[3]
             try:
@@ -453,6 +459,60 @@ class NermanaHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _upload_file(self, body: dict) -> dict:
+        if not self.agent.config.files.enabled:
+            return {"ok": False, "error": "file tools are disabled"}
+        if not self.agent.config.files.allowed_dirs:
+            return {"ok": False, "error": "no allowed upload folder is configured"}
+        filename = Path(str(body.get("filename") or "upload.bin")).name.strip()
+        if not filename:
+            return {"ok": False, "error": "filename is required"}
+        raw = str(body.get("content_base64") or "")
+        max_bytes = int(self.agent.config.files.max_read_mb) * 1024 * 1024
+        if len(raw) > max_bytes * 2:
+            return {"ok": False, "error": f"file exceeds {self.agent.config.files.max_read_mb} MB limit"}
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except Exception:
+            return {"ok": False, "error": "invalid base64 upload"}
+        if len(data) > max_bytes:
+            return {"ok": False, "error": f"file exceeds {self.agent.config.files.max_read_mb} MB limit"}
+        root = _safe_path(self.agent.config, str(self.agent.config.files.allowed_dirs[0])).resolve()
+        upload_dir = root / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            target = _unique_upload_path(upload_dir, filename)
+            target.write_bytes(data)
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+        result = {
+            "ok": True,
+            "filename": target.name,
+            "path": str(target),
+            "size": len(data),
+            "download_url": f"/api/files/download?path={quote(str(target), safe='')}",
+        }
+        if body.get("index"):
+            result["index_result"] = self.agent.run_tool("index_file", {"path": str(target)})
+        return result
+
+    def _download_file(self, raw_path: str) -> None:
+        try:
+            target = _safe_path(self.agent.config, unquote(raw_path))
+        except Exception as exc:
+            self._json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if not target.exists() or not target.is_file():
+            self._json({"ok": False, "error": "file not found"}, HTTPStatus.NOT_FOUND)
+            return
+        data = target.read_bytes()
+        self.send_response(HTTPStatus.OK.value)
+        self.send_header("Content-Type", mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Disposition", f'attachment; filename="{target.name}"')
+        self.end_headers()
+        self.wfile.write(data)
+
     def _preserve_redacted_secrets(self, patch: dict) -> dict:
         providers = patch.get("providers")
         if isinstance(providers, dict):
@@ -471,3 +531,21 @@ class NermanaHandler(BaseHTTPRequestHandler):
 
 def serve(host: str, port: int) -> None:
     SimpleNermanaServer().serve(host, port)
+
+
+def _unique_upload_path(folder: Path, filename: str) -> Path:
+    clean = "".join(char if char.isalnum() or char in "._- " else "_" for char in filename).strip()
+    clean = clean or "upload.bin"
+    root = folder.resolve()
+    target = (folder / clean).resolve()
+    if not (target == root or root in target.parents):
+        raise PermissionError("upload path escaped upload folder")
+    if not target.exists():
+        return target
+    stem = target.stem
+    suffix = target.suffix
+    for index in range(1, 1000):
+        candidate = folder / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError("too many uploads with the same name")

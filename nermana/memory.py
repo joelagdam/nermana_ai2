@@ -347,7 +347,7 @@ class MemoryStore:
         ]
         if not any(marker in lowered for marker in markers):
             return
-        content = f"User said: {message}\nAssistant replied: {reply[:600]}"
+        content = f"User said: {message}\nNermana replied: {reply[:600]}"
         self.remember(content, tags="conversation,user,auto", source="chat")
 
     def _trim_session(self, conn: sqlite3.Connection, session_id: str) -> None:

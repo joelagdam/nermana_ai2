@@ -89,11 +89,28 @@
         </section>
 
         <section id="chat" class="page">
-          <div id="chatLog" class="chat-log"></div>
-          <form id="chatForm" class="composer">
-            <input id="chatInput" name="message" autocomplete="off" placeholder="Ask Nermana" />
-            <button class="primary-action">Send</button>
-          </form>
+          <div class="chat-shell">
+            <div class="chat-profile">
+              <div class="avatar-mark">N</div>
+              <div>
+                <strong>Nermana</strong>
+                <span id="chatPresence">checking local core</span>
+              </div>
+              <button id="chatWeatherQuick" type="button">Weather</button>
+              <button id="chatSearchQuick" type="button">Search</button>
+            </div>
+            <div id="chatLog" class="chat-log"></div>
+            <div id="chatAttachTray" class="attach-tray">
+              <input id="chatFileInput" type="file" hidden />
+              <button id="chatAttachButton" type="button">Attach</button>
+              <label>Index <input id="chatIndexUpload" type="checkbox" checked /></label>
+              <span id="chatFileState">Allowed folder upload</span>
+            </div>
+            <form id="chatForm" class="composer">
+              <input id="chatInput" name="message" autocomplete="off" placeholder="Message Nermana" />
+              <button class="primary-action">Send</button>
+            </form>
+          </div>
         </section>
 
         <section id="models" class="page">

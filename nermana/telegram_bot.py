@@ -228,6 +228,13 @@ class TelegramBot:
 
     def _telegram_error(self, message: str, status: int, action: str) -> dict[str, Any]:
         lower = message.lower()
+        if status == 0 and any(word in lower for word in ["timed out", "timeout", "network", "temporary failure", "name or service", "connection refused", "no route", "unreachable"]):
+            return {
+                "ok": False,
+                "error": f"Telegram {action} is offline right now. Internet is missing or Telegram cannot be reached; Nermana will keep local web/core running.",
+                "status": status,
+                "offline": True,
+            }
         if status == 404 or "not found" in lower:
             return {
                 "ok": False,

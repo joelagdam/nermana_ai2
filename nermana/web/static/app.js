@@ -216,6 +216,7 @@ async function refreshAll() {
   statusCache = { agent: dashboardCache.agent, capabilities: dashboardCache.capabilities };
   statusLine.textContent = summarizeStatus(statusCache);
   renderStatusPills(statusCache);
+  updateChatPresence();
   fillForms();
   renderDashboard(dashboardCache);
   await renderPresets();
@@ -233,6 +234,14 @@ function summarizeStatus(status) {
   const model = status.agent?.config?.model || "no model";
   const modelOk = status.agent?.model_health?.ok ? "model ready" : "model unavailable";
   return `${online} | ${model} | ${modelOk}`;
+}
+
+function updateChatPresence() {
+  const node = document.getElementById("chatPresence");
+  if (!node || !dashboardCache.stats) return;
+  const modelReady = Boolean(dashboardCache.agent?.model_health?.ok);
+  const tools = `${dashboardCache.stats.tools_working || 0}/${dashboardCache.stats.tools_total || 0}`;
+  node.textContent = modelReady ? `local model ready | ${tools} tools` : `core mode | ${tools} tools`;
 }
 
 function renderStatusPills(status) {
@@ -511,21 +520,166 @@ document.getElementById("chatForm").addEventListener("submit", async (event) => 
   if (!message) return;
   addMessage("user", message);
   input.value = "";
+  const typing = addTypingMessage();
   const result = await runAction(
     "Chat",
     () => api("/api/chat", { method: "POST", body: JSON.stringify({ message, session_id: "web" }) }),
     "Reply ready"
   );
-  addMessage("assistant", result.reply || result.error || "");
+  typing.remove();
+  renderChatResult(result);
 });
 
-function addMessage(role, text) {
+document.getElementById("chatWeatherQuick").addEventListener("click", () => {
+  document.getElementById("chatInput").value = "/weather";
+  document.getElementById("chatForm").requestSubmit();
+});
+
+document.getElementById("chatSearchQuick").addEventListener("click", () => {
+  const input = document.getElementById("chatInput");
+  input.value = input.value.trim() ? `/search ${input.value.trim()}` : "/search ";
+  input.focus();
+});
+
+document.getElementById("chatAttachButton").addEventListener("click", () => {
+  document.getElementById("chatFileInput").click();
+});
+
+document.getElementById("chatFileInput").addEventListener("change", async (event) => {
+  const file = event.currentTarget.files?.[0];
+  if (!file) return;
+  addMessage("user", `Attached ${file.name}`);
+  const typing = addTypingMessage();
+  try {
+    const content_base64 = await fileToBase64(file);
+    const result = await runAction(
+      "File upload",
+      () =>
+        api("/api/files/upload", {
+          method: "POST",
+          body: JSON.stringify({
+            filename: file.name,
+            content_base64,
+            index: document.getElementById("chatIndexUpload").checked,
+          }),
+        }),
+      "File stored"
+    );
+    typing.remove();
+    if (!result.ok) {
+      addMessage("assistant", result.error || "Upload failed.");
+      return;
+    }
+    const detail = result.index_result?.ok ? `Stored and indexed ${result.filename}.` : `Stored ${result.filename}.`;
+    addMessage("assistant", `${detail}\nPath: ${result.path}`, {
+      attachments: result.download_url ? [{ label: "Download", href: result.download_url, detail: formatBytes(result.size || file.size) }] : [],
+      toolResults: result.index_result ? [result.index_result] : [],
+    });
+  } catch (error) {
+    typing.remove();
+    addMessage("assistant", String(error.message || error));
+  } finally {
+    event.currentTarget.value = "";
+  }
+});
+
+function renderChatResult(result) {
+  if (!result || result.ok === false) {
+    addMessage("assistant", result?.error || "I hit an error before I could answer.");
+    return;
+  }
+  const batches = Array.isArray(result.reply_batches) && result.reply_batches.length ? result.reply_batches : [result.reply || ""];
+  batches.forEach((batch, index) => {
+    addMessage("assistant", batch || "(empty)", {
+      meta: batches.length > 1 ? `${index + 1}/${batches.length}` : "",
+      toolResults: index === 0 ? result.tool_results || [] : [],
+    });
+  });
+}
+
+function addTypingMessage() {
+  const item = addMessage("assistant typing", "", { typing: true });
+  return item;
+}
+
+function addMessage(role, text, options = {}) {
   const log = document.getElementById("chatLog");
   const item = document.createElement("div");
   item.className = `message ${role}`;
-  item.textContent = text;
+  const bubble = document.createElement("div");
+  bubble.className = "message-bubble";
+  if (options.typing) {
+    bubble.append(document.createElement("span"), document.createElement("span"), document.createElement("span"));
+  } else {
+    bubble.textContent = cleanChatText(text);
+  }
+  item.appendChild(bubble);
+  const toolText = summarizeToolResults(options.toolResults || []);
+  if (toolText) {
+    const tools = document.createElement("div");
+    tools.className = "message-tools";
+    tools.textContent = toolText;
+    item.appendChild(tools);
+  }
+  (options.attachments || []).forEach((attachment) => {
+    const node = document.createElement("div");
+    node.className = "message-attachment";
+    const link = document.createElement("a");
+    link.href = attachment.href;
+    link.textContent = attachment.label || "Download";
+    link.download = "";
+    const detail = document.createElement("span");
+    detail.textContent = attachment.detail ? ` ${attachment.detail}` : "";
+    node.append(link, detail);
+    item.appendChild(node);
+  });
+  if (options.meta) {
+    const meta = document.createElement("div");
+    meta.className = "message-meta";
+    meta.textContent = options.meta;
+    item.appendChild(meta);
+  }
   log.appendChild(item);
   log.scrollTop = log.scrollHeight;
+  return item;
+}
+
+function cleanChatText(text) {
+  const value = String(text || "");
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return value;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return simpleValue(parsed);
+  } catch {
+    return value;
+  }
+}
+
+function summarizeToolResults(results) {
+  const usable = (results || []).filter(Boolean);
+  if (!usable.length) return "";
+  return usable
+    .slice(0, 4)
+    .map((result) => {
+      const name = result.tool || result.provider || "tool";
+      if (result.ok === false) return `${name}: ${result.error || "failed"}`;
+      if (result.results) return `${name}: ${result.results.length} result(s)`;
+      if (result.weather) return `${name}: weather loaded`;
+      if (result.memory_id) return `${name}: saved memory #${result.memory_id}`;
+      if (result.path) return `${name}: ${result.path}`;
+      return `${name}: done`;
+    })
+    .join(" | ");
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("Could not read file"));
+    reader.onload = () => resolve(String(reader.result || "").split(",", 2)[1] || "");
+    reader.readAsDataURL(file);
+  });
 }
 
 async function maybeInitiateChat() {

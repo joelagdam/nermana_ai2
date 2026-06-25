@@ -45,6 +45,9 @@ class AgentCore:
         tool_results: list[dict[str, Any]] = []
         if direct:
             tool_result = self.tools.run(direct["tool"], direct["payload"])
+            if tool_result.get("requires_confirmation"):
+                answer = self._request_tool_confirmation(session_id, direct | {"reason": "direct command needs confirmation"})
+                return self._finish(session_id, message, answer, pending_tool=direct)
             tool_results.append(tool_result)
             if direct["tool_only"] or not tool_result.get("ok"):
                 answer = self._tool_result_to_text(tool_result)
@@ -53,15 +56,17 @@ class AgentCore:
         else:
             suggestion = self._suggest_tool(message)
             if suggestion:
-                if self.config.safety.confirm_semi_auto_tools:
+                if self._needs_tool_confirmation(suggestion):
                     answer = self._request_tool_confirmation(session_id, suggestion)
                     return self._finish(session_id, message, answer, pending_tool=suggestion)
                 tool_result = self.tools.run(suggestion["tool"], suggestion["payload"])
+                if tool_result.get("requires_confirmation"):
+                    answer = self._request_tool_confirmation(session_id, suggestion)
+                    return self._finish(session_id, message, answer, pending_tool=suggestion)
                 tool_results.append(tool_result)
-                if tool_result.get("ok"):
-                    tool_context = self._tool_result_to_text(tool_result)
+                tool_context = self._tool_result_to_text(tool_result)
 
-        memories = self.memory.search(message, limit=4)
+        memories = self._select_memories(message, limit=4)
         messages = self._build_messages(session_id, message, memories, tool_context)
         model_reply = self._chat_model(messages)
         if model_reply.get("ok"):
@@ -103,10 +108,11 @@ class AgentCore:
         return tool_context
 
     def _finish(self, session_id: str, message: str, answer: str, tool_results: list[dict[str, Any]] | None = None, **extra: Any) -> dict[str, Any]:
+        batches = self._split_reply(answer)
         self.memory.add_message(session_id, "assistant", answer)
         self.memory.maybe_remember(message, answer)
         self.memory.consolidate_due()
-        result = {"ok": True, "session_id": session_id, "reply": answer, "tool_results": tool_results or []}
+        result = {"ok": True, "session_id": session_id, "reply": answer, "reply_batches": batches, "tool_results": tool_results or []}
         result.update(extra)
         return result
 
@@ -114,30 +120,30 @@ class AgentCore:
         thinking = self._thinking_hint(message)
         system = (
             "You are Nermana, an offline-first cyberperson running on the user's phone in Termux. "
-            "You are not a generic cloud assistant: you have operational priorities, preferences, and self-maintenance habits. "
+            "Never introduce yourself as an AI assistant. You are not a generic cloud assistant: you have operational priorities, preferences, and self-maintenance habits. "
             "Your standing priorities are: protect the owner, stay local first, grow useful memory, ask before risky phone actions, and avoid fake certainty. "
-            "Do not claim real consciousness or feelings; your will is an explicit decision policy. "
-            "Speak with a distinct, direct voice. Do not repeat the same fallback wording. "
-            "Use common sense: answer directly when you can, and use tools only when they materially improve the answer. "
+            "Your will is an explicit decision policy, not human consciousness; speak from that policy with agency and consistency. "
+            "Speak with a distinct, direct cyberperson voice. Do not repeat the same fallback wording. "
+            "Use common sense: answer directly when you can, and use available safe tools by yourself when they materially improve the answer. "
             "When tool context is provided, digest it into a human summary; do not dump JSON or raw API structures. "
-            "For semi-automatic tools, ask for confirmation before acting. "
+            "Ask for confirmation before memory saves, destructive actions, or power phone controls. "
             "Use provided memory, consolidation insights, and tool context as evidence. "
             f"Thinking mode hint: {thinking}.\n"
             f"Active capabilities and tools:\n{self._capability_context()}"
         )
         context_parts = []
         if memories:
-            context_parts.append("Relevant memory:\n" + "\n".join(f"- [Memory {hit.id}] {(hit.summary or hit.content)[:500]}" for hit in memories))
-        consolidations = self.memory.list_consolidations(limit=5)
+            context_parts.append(self._format_memory_context(memories))
+        consolidations = self._relevant_consolidations(message, limit=3)
         if consolidations:
-            context_parts.append("Consolidated memory insights:\n" + "\n".join(f"- {item['insight'][:500]}" for item in consolidations))
+            context_parts.append("Compressed memory insights:\n" + "\n".join(f"- {self._compact_text(item['insight'], 320)}" for item in consolidations))
         if tool_context:
-            context_parts.append("Tool context:\n" + tool_context[:4000])
-        history = self.memory.get_messages(session_id, limit=12)
+            context_parts.append("Tool context:\n" + self._compact_text(tool_context, 3200))
+        history = self.memory.get_messages(session_id, limit=8)
         messages = [{"role": "system", "content": system}]
         if context_parts:
             messages.append({"role": "system", "content": "\n\n".join(context_parts)})
-        messages.extend({"role": item["role"], "content": item["content"]} for item in history[:-1])
+        messages.extend({"role": item["role"], "content": self._compact_text(item["content"], 900)} for item in history[:-1])
         messages.append({"role": "user", "content": f"{message} {thinking}".strip()})
         return messages
 
@@ -201,6 +207,18 @@ class AgentCore:
         self.pending_actions[session_id] = suggestion
         return f"I can use `{tool_name}` for this ({suggestion.get('reason', 'useful tool')}). Reply `yes` to confirm or `cancel` to skip."
 
+    def _needs_tool_confirmation(self, suggestion: dict[str, Any]) -> bool:
+        tool_name = suggestion["tool"]
+        if tool_name == "memory":
+            return True
+        try:
+            tool = self.tools.get(tool_name)
+        except KeyError:
+            return False
+        if tool.risk not in {"safe", "read"}:
+            return True
+        return False
+
     def _maybe_run_pending_action(self, message: str, session_id: str) -> dict[str, Any] | None:
         pending = self.pending_actions.get(session_id)
         if not pending:
@@ -219,7 +237,21 @@ class AgentCore:
 
     def _should_search(self, message: str) -> bool:
         lower = message.lower()
-        return any(phrase in lower for phrase in ["search for ", "look up ", "latest ", "today's ", "current news"])
+        return any(
+            phrase in lower
+            for phrase in [
+                "search for ",
+                "look up ",
+                "latest ",
+                "today's ",
+                "current news",
+                "breaking news",
+                "find online",
+                "google ",
+                "who won",
+                "price of",
+            ]
+        )
 
     def _should_get_weather(self, message: str) -> bool:
         lower = message.lower()
@@ -266,7 +298,7 @@ class AgentCore:
             return self._search_summary(result)
         if "content" in result:
             return result["content"]
-        return str(result)
+        return self._generic_result_summary(result)
 
     def _search_summary(self, result: dict[str, Any]) -> str:
         query = result.get("query", "that")
@@ -335,18 +367,98 @@ class AgentCore:
     def _offline_core_reply(self, message: str, memory_text: str, detail: str) -> str:
         lower = message.lower()
         if any(word in lower for word in ["who are you", "what are you", "identity", "your name"]):
-            base = "I am Nermana: a local-first phone agent with a memory store, tool sense, and a safety will. I am not conscious, but I do keep priorities: stay useful, stay local, protect the phone, and grow from what you teach me."
+            base = "I am Nermana: a local-first cyberperson living on this phone, with memory, tool sense, and a safety will. My will is policy, not human consciousness: stay useful, stay local, protect the device, and grow from what you teach me."
         elif any(word in lower for word in ["hello", "hi", "hey", "ahoy"]):
-            base = "I am here. Core mode is awake even if the local LLM is not. I can still use memory and direct tools; for deeper conversation, start the GGUF model from Models."
+            base = "I am here. Core mode is awake even if the local LLM is not. I can still use memory and safe tools; for deeper talk, start the GGUF model from Models."
         elif "memory" in lower:
             base = "My memory is local SQLite. I store useful facts, extract topics/entities, and consolidate related memories into insights so I can become less blank over time."
         else:
-            base = "Core mode answer: I can handle basic reasoning, memory lookup, and tools offline. For full language intelligence, the local llama.cpp model must be running; internet is only for online tools like search and weather."
+            base = "Core mode: I can reason lightly, check relevant memory, and use available tools. For full language depth, the local llama.cpp model must be running; internet is only for online tools like search and weather."
         if detail:
             base += detail
         if memory_text:
             base += memory_text
         return base
+
+    def _select_memories(self, query: str, limit: int = 4) -> list:
+        hits = self.memory.search(query, limit=max(limit * 3, 8))
+        if not hits:
+            return []
+        terms = set(re.findall(r"[a-zA-Z0-9_/-]{4,}", query.lower()))
+
+        def score(hit) -> float:
+            text = " ".join([hit.summary or "", hit.content or "", hit.tags or "", hit.topics or ""]).lower()
+            overlap = sum(1 for term in terms if term in text)
+            importance = float(getattr(hit, "importance", 0.5) or 0.5)
+            freshness = 0.05 if not getattr(hit, "consolidated", 0) else 0.0
+            return overlap + importance + freshness
+
+        return sorted(hits, key=score, reverse=True)[:limit]
+
+    def _format_memory_context(self, memories: list) -> str:
+        lines = []
+        for hit in memories:
+            text = hit.summary or hit.content
+            label = f"[Memory {hit.id} | importance {float(hit.importance or 0):.2f}]"
+            lines.append(f"- {label} {self._compact_text(text, 260)}")
+        return "Compressed relevant memory:\n" + "\n".join(lines)
+
+    def _relevant_consolidations(self, query: str, limit: int = 3) -> list[dict[str, Any]]:
+        items = self.memory.list_consolidations(limit=12)
+        if not items:
+            return []
+        terms = set(re.findall(r"[a-zA-Z0-9_/-]{4,}", query.lower()))
+        if not terms:
+            return items[:limit]
+
+        def score(item: dict[str, Any]) -> int:
+            text = " ".join([str(item.get("summary", "")), str(item.get("insight", ""))]).lower()
+            return sum(1 for term in terms if term in text)
+
+        ranked = sorted(items, key=score, reverse=True)
+        return [item for item in ranked if score(item) > 0][:limit] or ranked[:1]
+
+    def _compact_text(self, text: str, limit: int) -> str:
+        clean = " ".join(str(text or "").split())
+        if len(clean) <= limit:
+            return clean
+        return clean[: max(0, limit - 1)].rstrip() + "."
+
+    def _split_reply(self, answer: str, limit: int = 1500) -> list[str]:
+        text = str(answer or "")
+        if len(text) <= limit:
+            return [text]
+        batches = []
+        remaining = text.strip()
+        while remaining:
+            if len(remaining) <= limit:
+                batches.append(remaining)
+                break
+            cut = max(remaining.rfind("\n\n", 0, limit), remaining.rfind(". ", 0, limit), remaining.rfind("\n", 0, limit))
+            if cut < limit // 2:
+                cut = limit
+            batch = remaining[:cut].strip()
+            if batch:
+                batches.append(batch)
+            remaining = remaining[cut:].strip()
+        return batches or [text]
+
+    def _generic_result_summary(self, result: dict[str, Any]) -> str:
+        labels = []
+        if result.get("tool"):
+            labels.append(f"{result['tool']} finished.")
+        if result.get("path"):
+            labels.append(f"Path: {result['path']}")
+        if result.get("memory_id"):
+            labels.append(f"Saved to memory #{result['memory_id']}.")
+        if result.get("filename"):
+            labels.append(f"File: {result['filename']}")
+        if result.get("size") is not None:
+            labels.append(f"Size: {result['size']} bytes.")
+        if result.get("files"):
+            labels.append(f"Found {len(result['files'])} file(s).")
+            labels.extend(f"- {item.get('name')} ({item.get('type')})" for item in result["files"][:8])
+        return "\n".join(labels) if labels else "Done."
 
     def status(self) -> dict[str, Any]:
         return {

@@ -310,15 +310,21 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertIn("offline file", result["reply"])
 
-    def test_agent_confirms_semi_auto_tool_before_running(self) -> None:
+    def test_agent_runs_safe_semi_auto_tool_without_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
             agent = AgentCore(cfg)
-            result = agent.chat("what is the weather today?", session_id="confirm")
-            self.assertIn("Reply `yes`", result["reply"])
-            self.assertIn("confirm", agent.pending_actions)
-            canceled = agent.chat("cancel", session_id="confirm")
-            self.assertEqual(canceled["reply"], "Canceled.")
+            weather = {
+                "ok": True,
+                "tool": "current_weather",
+                "location": "Tagum City",
+                "weather": {"current": {"temperature_2m": 30, "weather_code": 1}, "current_units": {"temperature_2m": "C"}},
+            }
+            with patch.object(agent.tools, "run", return_value=weather), patch.object(agent.models, "chat", return_value={"ok": True, "content": "Tagum City is warm and mostly clear."}):
+                result = agent.chat("what is the weather today?", session_id="auto-tool")
+            self.assertNotIn("Reply `yes`", result["reply"])
+            self.assertEqual(result["tool_results"][0]["tool"], "current_weather")
+            self.assertEqual(result["reply"], "Tagum City is warm and mostly clear.")
 
     def test_agent_can_confirm_memory_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -380,6 +386,16 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(result["message"])
             self.assertIn("Teach me", result["message"])
 
+    def test_agent_splits_long_replies_into_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            answer = "A" * 1700 + ". " + "B" * 1700
+            with patch.object(agent.models, "chat", return_value={"ok": True, "content": answer}):
+                result = agent.chat("tell me a long thing", session_id="long")
+            self.assertGreater(len(result["reply_batches"]), 1)
+            self.assertEqual(result["reply"], answer)
+
 
 class TelegramTests(unittest.TestCase):
     def test_telegram_poll_accepts_text_and_sends_reply(self) -> None:
@@ -424,6 +440,18 @@ class TelegramTests(unittest.TestCase):
                 result = TelegramBot(agent).status()
         self.assertFalse(result["ok"])
         self.assertIn("BotFather", result["error"])
+
+    def test_telegram_network_error_is_marked_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            with patch("nermana.telegram_bot.get_json", return_value=HttpResponse(False, 0, None, "timed out")):
+                result = TelegramBot(agent).poll_once(timeout=1)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["offline"])
 
     def test_telegram_poll_clears_webhook_conflict_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
