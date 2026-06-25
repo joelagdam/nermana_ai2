@@ -26,7 +26,7 @@ def get_json(url: str, params: dict[str, Any] | None = None, timeout: float = 10
             payload = response.read().decode("utf-8", errors="replace")
             return HttpResponse(True, response.status, json.loads(payload))
     except urllib.error.HTTPError as exc:
-        return HttpResponse(False, exc.code, None, str(exc))
+        return _http_error_response(exc)
     except Exception as exc:  # Network failures are expected on an offline-first phone.
         return HttpResponse(False, 0, None, str(exc))
 
@@ -41,6 +41,25 @@ def post_json(url: str, payload: dict[str, Any], timeout: float = 10.0, headers:
             text = response.read().decode("utf-8", errors="replace")
             return HttpResponse(True, response.status, json.loads(text) if text else {})
     except urllib.error.HTTPError as exc:
-        return HttpResponse(False, exc.code, None, str(exc))
+        return _http_error_response(exc)
     except Exception as exc:
         return HttpResponse(False, 0, None, str(exc))
+
+
+def _http_error_response(exc: urllib.error.HTTPError) -> HttpResponse:
+    body = ""
+    try:
+        body = exc.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        body = ""
+    detail = str(exc)
+    if body:
+        try:
+            parsed = json.loads(body)
+            message = parsed.get("error") if isinstance(parsed, dict) else None
+            if isinstance(message, dict):
+                message = message.get("message") or message.get("type")
+            detail = f"{detail}: {message or body}"
+        except json.JSONDecodeError:
+            detail = f"{detail}: {body[:500]}"
+    return HttpResponse(False, exc.code, None, detail)

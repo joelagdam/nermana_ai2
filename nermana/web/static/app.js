@@ -232,8 +232,7 @@ function summarizeStatus(status) {
   const caps = status.capabilities || [];
   const online = caps.find((cap) => cap.name === "internet")?.available ? "online" : "offline";
   const model = status.agent?.config?.model || "no model";
-  const modelOk = status.agent?.model_health?.ok ? "model ready" : "model unavailable";
-  return `${online} | ${model} | ${modelOk}`;
+  return `${online} | ${model} | ${modelStateText(status.agent?.model_health)}`;
 }
 
 function updateChatPresence() {
@@ -241,7 +240,7 @@ function updateChatPresence() {
   if (!node || !dashboardCache.stats) return;
   const modelReady = Boolean(dashboardCache.agent?.model_health?.ok);
   const tools = `${dashboardCache.stats.tools_working || 0}/${dashboardCache.stats.tools_total || 0}`;
-  node.textContent = modelReady ? `local model ready | ${tools} tools` : `core mode | ${tools} tools`;
+  node.textContent = modelReady ? `local model ready | ${tools} tools` : `${modelStateText(dashboardCache.agent?.model_health)} | ${tools} tools`;
 }
 
 function renderStatusPills(status) {
@@ -252,9 +251,15 @@ function renderStatusPills(status) {
   statusPills.innerHTML = "";
   statusPills.append(
     pill(internet?.available ? "Online" : "Offline", internet?.available ? "good" : "off"),
-    pill(localModel?.ok ? "Model ready" : "Model off", localModel?.ok ? "good" : "off"),
+    pill(localModel?.ok ? "Model ready" : localModel?.endpoint_ok ? "Chat failed" : "Model off", localModel?.ok ? "good" : localModel?.endpoint_ok ? "warn" : "off"),
     pill(llama?.available ? "llama found" : "llama missing", llama?.available ? "good" : "off")
   );
+}
+
+function modelStateText(health) {
+  if (health?.ok) return "model ready";
+  if (health?.endpoint_ok) return "model chat failed";
+  return "model unavailable";
 }
 
 function pill(text, kind = "") {
@@ -709,6 +714,7 @@ function renderSettingsCards() {
 async function renderModels() {
   const data = await api("/api/models");
   renderLlamaStatus(data.llama_server);
+  renderModelRuntime(data.health);
   const list = document.getElementById("modelsList");
   list.innerHTML = "";
   if (!data.models.length) {
@@ -853,14 +859,47 @@ function renderLlamaStatus(status) {
   node.textContent = `llama-server ${found}. Current setting: ${status.configured}.`;
 }
 
+function renderModelRuntime(health) {
+  const node = document.getElementById("modelRuntimeStatus");
+  if (!node) return;
+  node.innerHTML = "";
+  if (!health) {
+    node.appendChild(activityItem("Runtime", "No health data yet."));
+    return;
+  }
+  const state = health.ok ? "Chat ready" : health.endpoint_ok ? "Endpoint only" : "Offline";
+  node.appendChild(activityItem("Runtime", `${state} | ${health.base_url || config.model.base_url}`));
+  node.appendChild(activityItem("Chat model", health.chat_model || health.chat_check?.model || config.model.active_model || "none"));
+  if (health.chat_check?.error || health.error) {
+    node.appendChild(activityItem("Last error", health.chat_check?.error || health.error));
+  }
+  if (health.started_process) {
+    node.appendChild(activityItem("Process", `started pid ${health.started_process}`));
+  }
+}
+
 document.getElementById("scanModels").addEventListener("click", () => runAction("Models", renderModels, "Models scanned"));
+document.getElementById("healthModel").addEventListener("click", async () => {
+  const result = await runAction("Model health", () => api("/api/models/health"), "Health checked");
+  renderModelRuntime(result);
+  renderResult("modelOutput", result);
+});
 document.getElementById("restartModel").addEventListener("click", async () => {
   const result = await runAction("Model server", () => api("/api/models/restart", { method: "POST" }), "Restart requested");
+  renderModelRuntime(result);
   renderResult("modelOutput", result);
+  await refreshAll();
 });
 document.getElementById("startModel").addEventListener("click", async () => {
   const result = await runAction("Model server", () => api("/api/models/restart", { method: "POST" }), "Start requested");
+  renderModelRuntime(result);
   renderResult("modelOutput", result);
+  await refreshAll();
+});
+document.getElementById("stopModel").addEventListener("click", async () => {
+  const result = await runAction("Model server", () => api("/api/models/stop", { method: "POST" }), "Stop requested");
+  renderResult("modelOutput", result);
+  await refreshAll();
 });
 document.getElementById("detectLlama").addEventListener("click", async () => {
   const result = await runAction("llama-server", () => api("/api/models/llama/use-detected", { method: "POST" }), "Path saved");

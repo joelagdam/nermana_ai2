@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import socket
 from dataclasses import dataclass
+from typing import Any
 
 from .config import AppConfig
 from .models import ModelManager
@@ -24,11 +25,11 @@ def internet_available(timeout: float = 1.5) -> bool:
         return False
 
 
-def collect_capabilities(config: AppConfig, models: ModelManager, tools: ToolRegistry) -> list[Capability]:
-    model_health = models.server_health()
+def collect_capabilities(config: AppConfig, models: ModelManager, tools: ToolRegistry, model_health: dict[str, Any] | None = None) -> list[Capability]:
+    model_health = model_health or models.runtime_status()
     caps = [
         Capability("internet", internet_available(), "network probe"),
-        Capability("local_model", bool(model_health.get("ok")), model_health.get("error", "server healthy")),
+        Capability("local_model", bool(model_health.get("ok")), model_health.get("error") or model_health.get("state", "server healthy")),
         Capability("llama_server_binary", models.resolve_llama_server() is not None, models.resolve_llama_server() or config.model.llama_server_path),
         Capability("termux_api", shutil.which("termux-battery-status") is not None, "termux-battery-status"),
         Capability("shizuku_rish", shutil.which(config.phone.rish_path) is not None, config.phone.rish_path),

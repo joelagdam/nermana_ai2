@@ -148,11 +148,14 @@
           </div>
           <div class="model-tab" id="modelTab-runtime">
             <div class="toolbar">
+              <button id="healthModel">Health Check</button>
               <button id="restartModel">Restart Server</button>
               <button id="startModel">Start Server</button>
+              <button id="stopModel">Stop Server</button>
               <button id="detectLlama">Use Detected llama-server</button>
             </div>
             <div id="llamaStatus" class="setup-panel"></div>
+            <div id="modelRuntimeStatus" class="setup-panel"></div>
             <form id="modelSettings" class="grid-form">
               <label>Models folder <input name="models_dir" placeholder="models" /></label>
               <label>Base URL <input name="base_url" /></label>

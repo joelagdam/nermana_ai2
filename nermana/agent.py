@@ -361,7 +361,7 @@ class AgentCore:
         memory_text = ""
         if memories:
             memory_text = "\n\nRelevant memory I found:\n" + "\n".join(f"- {hit.content[:240]}" for hit in memories)
-        detail = f" Local model is unavailable: {model_error}" if model_error else ""
+        detail = f" The local model refused this turn: {model_error}" if model_error else ""
         return self._offline_core_reply(message, memory_text, detail)
 
     def _offline_core_reply(self, message: str, memory_text: str, detail: str) -> str:
@@ -369,11 +369,11 @@ class AgentCore:
         if any(word in lower for word in ["who are you", "what are you", "identity", "your name"]):
             base = "I am Nermana: a local-first cyberperson living on this phone, with memory, tool sense, and a safety will. My will is policy, not human consciousness: stay useful, stay local, protect the device, and grow from what you teach me."
         elif any(word in lower for word in ["hello", "hi", "hey", "ahoy"]):
-            base = "I am here. Core mode is awake even if the local LLM is not. I can still use memory and safe tools; for deeper talk, start the GGUF model from Models."
+            base = "I am here. My core is awake even when the larger voice engine stumbles. I can still remember, check tools, and help bring the GGUF model back online."
         elif "memory" in lower:
             base = "My memory is local SQLite. I store useful facts, extract topics/entities, and consolidate related memories into insights so I can become less blank over time."
         else:
-            base = "Core mode: I can reason lightly, check relevant memory, and use available tools. For full language depth, the local llama.cpp model must be running; internet is only for online tools like search and weather."
+            base = "I am running from my core layer right now: lighter, but not empty. I can still use memory, choose safe tools, and keep the phone-side system steady while the llama.cpp model is brought back."
         if detail:
             base += detail
         if memory_text:
@@ -467,7 +467,7 @@ class AgentCore:
                 "base_url": self.config.model.base_url,
                 "thinking_mode": self.config.model.thinking_mode,
             },
-            "model_health": self.models.server_health(),
+            "model_health": self.models.runtime_status(),
             "tools": self.tools.list_metadata(),
             "sessions": self.memory.list_sessions(),
         }
@@ -476,7 +476,7 @@ class AgentCore:
         history = self.memory.get_messages(session_id, limit=2)
         memory_count = self.memory.count_memories()
         insights = self.memory.list_consolidations(limit=1)
-        model_ok = self.models.server_health().get("ok")
+        model_ok = self.models.runtime_status().get("ok")
         if not history:
             if memory_count:
                 content = (

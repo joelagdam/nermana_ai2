@@ -122,6 +122,29 @@ class ModelTests(unittest.TestCase):
         self.assertIn("-b", command)
         self.assertIn("256", command)
 
+    def test_chat_retries_server_advertised_model_after_bad_request(self) -> None:
+        cfg = AppConfig(model=ModelConfig(active_model="wrong.gguf"))
+        manager = ModelManager(cfg, persist=False)
+        models = HttpResponse(True, 200, {"data": [{"id": "server-model"}]})
+        bad = HttpResponse(False, 400, None, "HTTP Error 400: model not found")
+        good = HttpResponse(True, 200, {"choices": [{"message": {"content": "OK"}}]})
+        with patch("nermana.models.get_json", return_value=models), patch("nermana.models.post_json", side_effect=[bad, good]):
+            result = manager.chat([{"role": "user", "content": "hi"}])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["model"], "server-model")
+
+    def test_runtime_status_requires_chat_completions(self) -> None:
+        cfg = AppConfig(model=ModelConfig(active_model="active.gguf"))
+        manager = ModelManager(cfg, persist=False)
+        models = HttpResponse(True, 200, {"data": [{"id": "active.gguf"}]})
+        bad = HttpResponse(False, 400, None, "HTTP Error 400: Bad Request")
+        with patch("nermana.models.get_json", return_value=models), patch("nermana.models.post_json", return_value=bad):
+            result = manager.runtime_status()
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["endpoint_ok"])
+        self.assertFalse(result["ready"])
+        self.assertIn("chat failed", result["state"])
+
 
 class MemoryTests(unittest.TestCase):
     def test_memory_retains_and_searches(self) -> None:
@@ -381,7 +404,7 @@ class AgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
             agent = AgentCore(cfg)
-            with patch.object(agent.models, "server_health", return_value={"ok": False}):
+            with patch.object(agent.models, "runtime_status", return_value={"ok": False}):
                 result = agent.initiative_message("fresh")
             self.assertTrue(result["message"])
             self.assertIn("Teach me", result["message"])

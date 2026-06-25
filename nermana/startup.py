@@ -51,9 +51,12 @@ class StartupManager:
         if not self.agent.config.model.active_model:
             print("model: no .gguf selected or available")
             return
-        if self.agent.models.server_health().get("ok"):
-            print("model: llama-server already responding")
+        health = self.agent.models.runtime_status()
+        if health.get("ok"):
+            print("model: llama-server already responding to chat")
             return
+        if health.get("endpoint_ok"):
+            print(f"model: endpoint is up but chat is not ready ({health.get('chat_check', {}).get('error') or health.get('state')})")
         result = self.agent.models.restart_server()
         self.model_started = bool(result.get("started_process"))
         if result.get("ok"):

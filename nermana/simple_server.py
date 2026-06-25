@@ -128,7 +128,10 @@ class SimpleNermanaServer:
 
     def dashboard_snapshot(self) -> dict:
         agent_status = self.agent.status()
-        capabilities = [cap.__dict__ for cap in collect_capabilities(self.agent.config, self.agent.models, self.agent.tools)]
+        capabilities = [
+            cap.__dict__
+            for cap in collect_capabilities(self.agent.config, self.agent.models, self.agent.tools, agent_status.get("model_health"))
+        ]
         tools = list(agent_status.get("tools", []))
         sessions = list(agent_status.get("sessions", []))
         memory_count = self.agent.memory.count_memories()
@@ -265,10 +268,12 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._json(
                 {
                     "models": [model.__dict__ for model in self.agent.models.scan()],
-                    "health": self.agent.models.server_health(),
+                    "health": self.agent.models.runtime_status(),
                     "llama_server": self.agent.models.llama_server_status(),
                 }
             )
+        elif path == "/api/models/health":
+            self._json(self.agent.models.runtime_status())
         elif path == "/api/models/presets":
             self._json({"presets": list_presets()})
         elif path.startswith("/api/models/downloads/"):
@@ -300,7 +305,7 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._json(
                 {
                     "recent_sessions": self.agent.memory.list_sessions(),
-                    "model_health": self.agent.models.server_health(),
+                    "model_health": self.agent.models.runtime_status(),
                     "tools": self.agent.tools.list_metadata(),
                 }
             )
@@ -339,6 +344,10 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST)
         elif path == "/api/models/restart":
             self._json(self.agent.models.restart_server())
+        elif path == "/api/models/stop":
+            self.agent.models.stop_server()
+            killed = self.agent.models.stop_external_server()
+            self._json({"ok": True, "message": "Model server stop requested.", "killed_external": killed, "health": self.agent.models.server_health()})
         elif path == "/api/models/test":
             self._json(self.agent.models.chat([{"role": "user", "content": str(body.get("message", ""))}], max_tokens=128))
         elif path == "/api/models/llama/use-detected":
@@ -422,9 +431,13 @@ class NermanaHandler(BaseHTTPRequestHandler):
         return self.server_state.agent
 
     def _status(self) -> dict:
+        agent_status = self.agent.status()
         return {
-            "agent": self.agent.status(),
-            "capabilities": [cap.__dict__ for cap in collect_capabilities(self.agent.config, self.agent.models, self.agent.tools)],
+            "agent": agent_status,
+            "capabilities": [
+                cap.__dict__
+                for cap in collect_capabilities(self.agent.config, self.agent.models, self.agent.tools, agent_status.get("model_health"))
+            ],
         }
 
     def _parsed(self) -> tuple[str, dict[str, list[str]]]:

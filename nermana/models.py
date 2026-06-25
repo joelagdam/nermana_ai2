@@ -4,6 +4,7 @@ import subprocess
 import time
 import shutil
 import os
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -125,7 +126,7 @@ class ModelManager:
             "status": "active" if match.active else "idle",
         }
         if match.active:
-            result["server_health"] = self.server_health()
+            result["server_health"] = self.runtime_status()
         return result
 
     def delete_model(self, model_name: str, force: bool = False) -> dict[str, Any]:
@@ -153,12 +154,46 @@ class ModelManager:
     def server_health(self) -> dict[str, Any]:
         response = get_json(f"{self.config.model.base_url.rstrip('/')}/models", timeout=2)
         if response.ok:
-            return {"ok": True, "base_url": self.config.model.base_url, "data": response.data}
-        return {"ok": False, "base_url": self.config.model.base_url, "error": response.error}
+            return {
+                "ok": True,
+                "endpoint_ok": True,
+                "ready": None,
+                "base_url": self.config.model.base_url,
+                "data": response.data,
+                "chat_model": self._chat_model_name(response.data),
+                "state": "endpoint reachable; chat not checked",
+            }
+        return {"ok": False, "endpoint_ok": False, "ready": False, "base_url": self.config.model.base_url, "error": response.error, "state": "offline"}
 
-    def chat(self, messages: list[dict[str, str]], max_tokens: int = 512) -> dict[str, Any]:
+    def runtime_status(self) -> dict[str, Any]:
+        health = self.server_health()
+        if not health.get("endpoint_ok"):
+            return health
+        chat = self.chat(
+            [
+                {"role": "system", "content": "You are Nermana. Reply with OK only."},
+                {"role": "user", "content": "ready?"},
+            ],
+            max_tokens=4,
+            timeout=min(float(self.config.model.request_timeout_seconds), 8.0),
+            model_name=health.get("chat_model"),
+        )
+        health["ready"] = bool(chat.get("ok"))
+        health["ok"] = bool(chat.get("ok"))
+        health["chat_check"] = {"ok": bool(chat.get("ok")), "error": chat.get("error", ""), "model": chat.get("model")}
+        health["state"] = "chat ready" if chat.get("ok") else "endpoint reachable, chat failed"
+        return health
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int = 512,
+        timeout: float | None = None,
+        model_name: str | None = None,
+    ) -> dict[str, Any]:
+        selected_model = model_name or self.config.model.active_model or "local"
         payload = {
-            "model": self.config.model.active_model or "local",
+            "model": selected_model,
             "messages": messages,
             "temperature": self.config.model.temperature,
             "top_p": self.config.model.top_p,
@@ -168,15 +203,34 @@ class ModelManager:
         response = post_json(
             f"{self.config.model.base_url.rstrip('/')}/chat/completions",
             payload,
-            timeout=self.config.model.request_timeout_seconds,
+            timeout=timeout or self.config.model.request_timeout_seconds,
         )
+        if not response.ok and response.status == 400:
+            alternate_model = self._remote_model_id()
+            if alternate_model and alternate_model != selected_model:
+                payload["model"] = alternate_model
+                retry = post_json(
+                    f"{self.config.model.base_url.rstrip('/')}/chat/completions",
+                    payload,
+                    timeout=timeout or self.config.model.request_timeout_seconds,
+                )
+                if retry.ok:
+                    response = retry
+                    selected_model = alternate_model
+                else:
+                    return {
+                        "ok": False,
+                        "error": f"{response.error}; retry with server model `{alternate_model}` failed: {retry.error}",
+                        "model": selected_model,
+                        "retry_model": alternate_model,
+                    }
         if not response.ok:
-            return {"ok": False, "error": response.error}
+            return {"ok": False, "error": response.error, "model": selected_model}
         try:
             content = response.data["choices"][0]["message"]["content"]
         except Exception:
             return {"ok": False, "error": "Model response did not match OpenAI chat format.", "raw": response.data}
-        return {"ok": True, "content": content, "raw": response.data}
+        return {"ok": True, "content": content, "raw": response.data, "model": selected_model}
 
     def restart_server(self) -> dict[str, Any]:
         model = self.active_path()
@@ -191,6 +245,7 @@ class ModelManager:
             }
         self.stop_server()
         port = self._port_from_base_url()
+        killed = self.stop_external_server(port)
         command = self._server_command(llama_server, model, port, fast=True)
         try:
             self._process = self._start_process(command)
@@ -203,11 +258,12 @@ class ModelManager:
             if self.config.model.fallback_model:
                 self.config.model.active_model = self.config.model.fallback_model
                 self._save()
-            return {"ok": False, "error": str(exc), "command": command}
+            return {"ok": False, "error": str(exc), "command": command, "killed_external": killed}
         time.sleep(1)
-        health = self.server_health()
+        health = self.runtime_status()
         health["started_process"] = self._process.pid if self._process else None
         health["command"] = command
+        health["killed_external"] = killed
         return health
 
     def _server_command(self, llama_server: str, model: Path, port: int, fast: bool) -> list[str]:
@@ -256,6 +312,47 @@ class ModelManager:
                 self._process.kill()
         self._process = None
 
+    def stop_external_server(self, port: int | None = None) -> list[int]:
+        port = port or self._port_from_base_url()
+        killed: list[int] = []
+        pids = self._pids_on_port(port)
+        for pid in pids:
+            if pid == os.getpid() or pid in killed:
+                continue
+            cmdline = self._cmdline(pid).lower()
+            if "llama" not in cmdline:
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed.append(pid)
+            except OSError:
+                continue
+        if killed:
+            time.sleep(0.8)
+        return killed
+
+    def _pids_on_port(self, port: int) -> list[int]:
+        commands = []
+        if shutil.which("lsof"):
+            commands.append(["lsof", "-ti", f"TCP:{port}"])
+        if shutil.which("fuser"):
+            commands.append(["fuser", f"{port}/tcp"])
+        for command in commands:
+            try:
+                result = subprocess.run(command, capture_output=True, text=True, timeout=3, check=False)
+            except Exception:
+                continue
+            pids = [int(item) for item in result.stdout.replace(",", " ").split() if item.isdigit()]
+            if pids:
+                return pids
+        return []
+
+    def _cmdline(self, pid: int) -> str:
+        try:
+            return Path(f"/proc/{pid}/cmdline").read_text(encoding="utf-8", errors="replace").replace("\x00", " ")
+        except OSError:
+            return ""
+
     def _port_from_base_url(self) -> int:
         marker = "://"
         url = self.config.model.base_url
@@ -268,3 +365,29 @@ class ModelManager:
     def _save(self) -> None:
         if self.persist:
             save_config(self.config)
+
+    def _remote_model_id(self) -> str | None:
+        response = get_json(f"{self.config.model.base_url.rstrip('/')}/models", timeout=2)
+        if not response.ok:
+            return None
+        return self._chat_model_name(response.data)
+
+    def _chat_model_name(self, models_data: Any = None) -> str:
+        model_ids = self._model_ids(models_data)
+        active = self.config.model.active_model
+        if active and active in model_ids:
+            return active
+        if model_ids:
+            return model_ids[0]
+        return active or "local"
+
+    def _model_ids(self, models_data: Any) -> list[str]:
+        if not isinstance(models_data, dict):
+            return []
+        items = models_data.get("data") or []
+        ids = []
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict) and item.get("id"):
+                    ids.append(str(item["id"]))
+        return ids

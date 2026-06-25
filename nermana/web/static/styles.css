@@ -260,6 +260,12 @@ p {
   color: var(--green);
 }
 
+.status-pill.warn {
+  border-color: rgba(216, 138, 8, 0.34);
+  background: #fff8e8;
+  color: #9b6507;
+}
+
 .icon-button {
   display: none;
   width: 42px;
@@ -285,6 +291,13 @@ p {
 
 .page.active {
   display: block;
+}
+
+#chat.page.active {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  height: calc(100vh - 82px);
+  overflow: hidden;
 }
 
 .dashboard-hero {
@@ -553,8 +566,8 @@ pre {
 .chat-shell {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
-  height: calc(100vh - 112px);
-  min-height: 520px;
+  height: 100%;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid rgba(174, 184, 203, 0.72);
   border-radius: var(--radius);
@@ -1039,6 +1052,10 @@ pre {
     padding: 12px;
   }
 
+  #chat.page.active {
+    height: calc(100vh - 74px);
+  }
+
   h1 {
     font-size: 20px;
   }
@@ -1080,11 +1097,6 @@ pre {
   .state-label {
     grid-column: 2;
     justify-self: start;
-  }
-
-  .chat-shell {
-    height: calc(100vh - 98px);
-    min-height: 0;
   }
 
   .chat-profile {
