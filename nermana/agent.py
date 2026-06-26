@@ -71,6 +71,8 @@ class AgentCore:
         model_reply = self._chat_model(messages)
         if model_reply.get("ok"):
             answer = model_reply["content"].strip()
+            if tool_results and self._model_ignored_successful_tool(answer, tool_results[-1]):
+                answer = self._tool_result_to_text(tool_results[-1])
         else:
             answer = self._fallback_reply(message, memories, tool_results, model_reply.get("error", ""))
         return self._finish(
@@ -339,6 +341,22 @@ class AgentCore:
         if "content" in result:
             return result["content"]
         return self._generic_result_summary(result)
+
+    def _model_ignored_successful_tool(self, answer: str, tool_result: dict[str, Any]) -> bool:
+        if not tool_result.get("ok"):
+            return False
+        lower = answer.lower()
+        denial_markers = [
+            "cannot access",
+            "can't access",
+            "cannot read",
+            "can't read",
+            "do not have access",
+            "don't have access",
+            "unable to access",
+            "unable to read",
+        ]
+        return any(marker in lower for marker in denial_markers)
 
     def _search_summary(self, result: dict[str, Any]) -> str:
         query = result.get("query", "that")

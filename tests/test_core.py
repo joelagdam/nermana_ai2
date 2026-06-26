@@ -444,6 +444,21 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertIn("offline file", result["reply"])
 
+    def test_agent_prefers_successful_tool_result_over_model_denial(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            note = root / "note.txt"
+            note.write_text("offline file", encoding="utf-8")
+            cfg = AppConfig(
+                files=FileConfig(allowed_dirs=[str(root)]),
+                memory=MemoryConfig(db_path=str(root / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            with patch.object(agent.models, "chat", return_value={"ok": True, "content": "I cannot access files on this device."}):
+                result = agent.chat(f"/read {note}", session_id="test")
+            self.assertTrue(result["ok"])
+            self.assertIn("offline file", result["reply"])
+
     def test_agent_runs_safe_semi_auto_tool_without_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
