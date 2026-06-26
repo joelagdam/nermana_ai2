@@ -401,7 +401,7 @@ class AgentCore:
         memory_text = ""
         if memories:
             memory_text = "\n\nRelevant memory I found:\n" + "\n".join(f"- {hit.content[:240]}" for hit in memories)
-        detail = f" The local model refused this turn: {model_error}" if model_error else ""
+        detail = self._friendly_model_error(model_error)
         return self._offline_core_reply(message, memory_text, detail)
 
     def _offline_core_reply(self, message: str, memory_text: str, detail: str) -> str:
@@ -415,10 +415,29 @@ class AgentCore:
         else:
             base = "I am running from my core layer right now: lighter, but not empty. I can still use memory, choose safe tools, and keep the phone-side system steady while the llama.cpp model is brought back."
         if detail:
-            base += detail
+            base += "\n\n" + detail
         if memory_text:
             base += memory_text
         return base
+
+    def _friendly_model_error(self, error: str) -> str:
+        if not error:
+            return ""
+        lower = error.lower()
+        if self._context_overflow(error):
+            available = self._available_context_from_error(error)
+            configured = int(self.config.model.context_size or 0)
+            if available:
+                return (
+                    f"Local model status: llama.cpp rejected the prompt because its live context is {available} tokens "
+                    f"while Nermana is configured for {configured} tokens. Restart the model server from Models so it uses the saved context."
+                )
+            return "Local model status: llama.cpp rejected the prompt because its live context window is too small. Restart from Models with a larger context."
+        if any(part in lower for part in ["connection refused", "failed to establish", "not responding", "timed out", "timeout"]):
+            return "Local model status: llama.cpp is not reachable. Start or restart it from Models; core memory and safe tools remain available."
+        if "bad request" in lower or "http error 400" in lower:
+            return "Local model status: llama.cpp rejected the request. Check the active model id and context settings in Models."
+        return "Local model status: " + self._compact_text(error, 180)
 
     def _select_memories(self, query: str, limit: int = 4) -> list:
         hits = self.memory.search(query, limit=max(limit * 3, 8))

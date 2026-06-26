@@ -870,6 +870,15 @@ function renderModelRuntime(health) {
   const state = health.ok ? "Chat ready" : health.endpoint_ok ? "Endpoint only" : "Offline";
   node.appendChild(activityItem("Runtime", `${state} | ${health.base_url || config.model.base_url}`));
   node.appendChild(activityItem("Chat model", health.chat_model || health.chat_check?.model || config.model.active_model || "none"));
+  if (health.configured_context_size) {
+    node.appendChild(activityItem("Configured context", `${health.configured_context_size} tokens`));
+  }
+  if (health.server_context_size) {
+    node.appendChild(activityItem("Live server context", `${health.server_context_size} tokens`));
+  }
+  if (health.context_mismatch) {
+    node.appendChild(activityItem("Context mismatch", health.context_warning || "Restart llama.cpp so it uses the saved context setting."));
+  }
   if (health.chat_check?.error || health.error) {
     node.appendChild(activityItem("Last error", health.chat_check?.error || health.error));
   }
@@ -1234,6 +1243,22 @@ document.getElementById("resetDefaultsButton").addEventListener("click", async (
         body: JSON.stringify({ preserve_secrets: true, preserve_model_selection: true }),
       }),
     "Defaults restored"
+  );
+  renderResult("settingsOutput", result);
+  await refreshAll();
+});
+
+document.getElementById("fullResetDefaultsButton").addEventListener("click", async () => {
+  const ok = window.confirm("Full reset defaults? This clears saved provider tokens and active model selection from config. It does not delete models, memory, or downloaded files.");
+  if (!ok) return;
+  const result = await runAction(
+    "Defaults",
+    () =>
+      api("/api/settings/reset", {
+        method: "POST",
+        body: JSON.stringify({ preserve_secrets: false, preserve_model_selection: false }),
+      }),
+    "Full defaults restored"
   );
   renderResult("settingsOutput", result);
   await refreshAll();

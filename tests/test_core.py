@@ -60,6 +60,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(reset.telegram.token, "token")
         self.assertTrue(reset.telegram.enabled)
 
+    def test_reset_config_defaults_can_clear_model_and_secrets(self) -> None:
+        cfg = AppConfig(
+            model=ModelConfig(active_model="phone.gguf", fallback_model="old.gguf", models_dir="custom-models"),
+            telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7]),
+        )
+        reset = reset_config_defaults(cfg, preserve_secrets=False, preserve_model_selection=False)
+        self.assertEqual(reset.model.active_model, "")
+        self.assertEqual(reset.model.fallback_model, "")
+        self.assertEqual(reset.model.models_dir, "models")
+        self.assertEqual(reset.telegram.token, "")
+        self.assertFalse(reset.telegram.enabled)
+
 
 class ModelTests(unittest.TestCase):
     def test_scan_and_switch_gguf(self) -> None:
@@ -77,6 +89,18 @@ class ModelTests(unittest.TestCase):
             self.assertTrue(manager.switch("tiny.gguf")["ok"])
             self.assertEqual(cfg.model.active_model, "tiny.gguf")
             self.assertFalse(manager.switch("typo.guff")["ok"])
+
+    def test_switch_invalidates_runtime_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "models"
+            model_dir.mkdir()
+            (model_dir / "tiny.gguf").write_bytes(b"model")
+            cfg = AppConfig(model=ModelConfig(models_dir=str(model_dir)))
+            manager = ModelManager(cfg, persist=False)
+            manager._runtime_cache = {"ok": True}
+            manager._runtime_cache_at = 1.0
+            self.assertTrue(manager.switch("tiny.gguf")["ok"])
+            self.assertIsNone(manager._runtime_cache)
 
     def test_check_and_delete_idle_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,6 +179,20 @@ class ModelTests(unittest.TestCase):
         self.assertTrue(result["endpoint_ok"])
         self.assertFalse(result["ready"])
         self.assertIn("chat failed", result["state"])
+
+    def test_runtime_status_reports_context_mismatch(self) -> None:
+        cfg = AppConfig(model=ModelConfig(active_model="active.gguf", context_size=4096))
+        manager = ModelManager(cfg, persist=False)
+        models = HttpResponse(True, 200, {"data": [{"id": "active.gguf"}]})
+        error = "HTTP Error 400: Bad Request: request (1092 tokens) exceeds the available context size (512 tokens), try increasing it"
+        bad = HttpResponse(False, 400, None, error)
+        with patch("nermana.models.get_json", return_value=models), patch("nermana.models.post_json", return_value=bad):
+            result = manager.runtime_status(force=True)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["context_mismatch"])
+        self.assertEqual(result["server_context_size"], 512)
+        self.assertEqual(result["configured_context_size"], 4096)
+        self.assertIn("Restart llama.cpp", result["context_warning"])
 
 
 class MemoryTests(unittest.TestCase):
@@ -469,6 +507,43 @@ class TelegramTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["processed"], 1)
             self.assertTrue(send.called)
+
+    def test_telegram_sends_reply_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7], offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            update = {"update_id": 5, "message": {"chat": {"id": 123}, "from": {"id": 7}, "text": "tell me"}}
+            chat_result = {"ok": True, "reply": "first\n\nsecond", "reply_batches": ["first", "second"], "model_ok": True}
+            with patch.object(agent, "chat", return_value=chat_result), patch.object(TelegramBot, "_typing_loop", return_value=None), patch(
+                "nermana.telegram_bot.get_json", return_value=HttpResponse(True, 200, {"ok": True, "result": [update]})
+            ), patch("nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})) as post:
+                result = TelegramBot(agent).poll_once(timeout=1)
+            sent_texts = [call.args[1]["text"] for call in post.call_args_list if call.args[0].endswith("/sendMessage")]
+            self.assertTrue(result["ok"])
+            self.assertEqual(sent_texts, ["first", "second"])
+
+    def test_telegram_shortens_model_context_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7], offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            update = {"update_id": 5, "message": {"chat": {"id": 123}, "from": {"id": 7}, "text": "hello"}}
+            error = "HTTP Error 400: Bad Request: request exceeds the available context size (512 tokens)"
+            chat_result = {"ok": True, "reply": error, "reply_batches": [error], "model_ok": False, "model_error": error}
+            with patch.object(agent, "chat", return_value=chat_result), patch.object(TelegramBot, "_typing_loop", return_value=None), patch(
+                "nermana.telegram_bot.get_json", return_value=HttpResponse(True, 200, {"ok": True, "result": [update]})
+            ), patch("nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})) as post:
+                result = TelegramBot(agent).poll_once(timeout=1)
+            sent_texts = [call.args[1]["text"] for call in post.call_args_list if call.args[0].endswith("/sendMessage")]
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(sent_texts), 1)
+            self.assertIn("context window", sent_texts[0])
+            self.assertNotIn("HTTP Error 400", sent_texts[0])
 
     def test_telegram_persists_offset_between_instances(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -4,6 +4,7 @@ import subprocess
 import time
 import shutil
 import os
+import re
 import signal
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,6 +112,7 @@ class ModelManager:
         previous = self.config.model.active_model
         self.config.model.fallback_model = previous or self.config.model.fallback_model
         self.config.model.active_model = model_name
+        self.invalidate_runtime_cache()
         self._save()
         return {"ok": True, "active_model": model_name, "previous_model": previous}
 
@@ -150,7 +152,10 @@ class ModelManager:
             return {"ok": False, "error": f"{exc}. {hint}", "path": str(target)}
         if self.config.model.active_model == model_name:
             self.config.model.active_model = ""
+            self.invalidate_runtime_cache()
             self._save()
+        else:
+            self.invalidate_runtime_cache()
         return {"ok": True, "deleted": model_name, "path": str(target), "active_model": self.config.model.active_model}
 
     def server_health(self) -> dict[str, Any]:
@@ -186,6 +191,7 @@ class ModelManager:
         health["ready"] = bool(chat.get("ok"))
         health["ok"] = bool(chat.get("ok"))
         health["chat_check"] = {"ok": bool(chat.get("ok")), "error": chat.get("error", ""), "model": chat.get("model")}
+        self._attach_context_status(health, chat.get("error", ""))
         health["state"] = "chat ready" if chat.get("ok") else "endpoint reachable, chat failed"
         self._cache_runtime(health)
         return health
@@ -193,6 +199,34 @@ class ModelManager:
     def _cache_runtime(self, health: dict[str, Any]) -> None:
         self._runtime_cache = dict(health)
         self._runtime_cache_at = time.time()
+
+    def invalidate_runtime_cache(self) -> None:
+        self._runtime_cache = None
+        self._runtime_cache_at = 0.0
+
+    def _attach_context_status(self, health: dict[str, Any], error: str) -> None:
+        available = self._available_context_from_error(error)
+        configured = int(self.config.model.context_size or 0)
+        if not available:
+            health["configured_context_size"] = configured
+            return
+        health["server_context_size"] = available
+        health["configured_context_size"] = configured
+        health["context_mismatch"] = configured > available
+        if configured > available:
+            health["context_warning"] = (
+                f"llama.cpp is serving {available} tokens, but Nermana is configured for {configured}. "
+                "Restart llama.cpp from Models or termux_start_all.sh so the saved context is applied."
+            )
+
+    def _available_context_from_error(self, error: str) -> int | None:
+        match = re.search(r"available context size\s*\((\d+)\s+tokens?\)", str(error or ""), re.I)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
 
     def chat(
         self,
@@ -243,6 +277,7 @@ class ModelManager:
         return {"ok": True, "content": content, "raw": response.data, "model": selected_model}
 
     def restart_server(self) -> dict[str, Any]:
+        self.invalidate_runtime_cache()
         model = self.active_path()
         if model is None:
             return {"ok": False, "error": "Select a .gguf model first."}
@@ -321,7 +356,7 @@ class ModelManager:
             except subprocess.TimeoutExpired:
                 self._process.kill()
         self._process = None
-        self._runtime_cache = None
+        self.invalidate_runtime_cache()
 
     def stop_external_server(self, port: int | None = None) -> list[int]:
         port = port or self._port_from_base_url()
@@ -340,6 +375,7 @@ class ModelManager:
                 continue
         if killed:
             time.sleep(0.8)
+            self.invalidate_runtime_cache()
         return killed
 
     def _pids_on_port(self, port: int) -> list[int]:

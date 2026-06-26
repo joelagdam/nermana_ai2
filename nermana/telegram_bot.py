@@ -137,12 +137,16 @@ class TelegramBot:
             typing_thread = threading.Thread(target=self._typing_loop, args=(chat_id, stop_typing), daemon=True)
             typing_thread.start()
             try:
-                reply = self.agent.chat(text, session_id=f"telegram-{chat_id}")["reply"]
+                chat_result = self.agent.chat(text, session_id=f"telegram-{chat_id}")
+            except Exception as exc:
+                chat_result = {"ok": False, "error": str(exc)}
             finally:
                 stop_typing.set()
-            sent = self._send(chat_id, reply)
-            if not sent.get("ok"):
-                errors.append(sent.get("error", "send failed"))
+            for reply in self._reply_batches(chat_result):
+                sent = self._send(chat_id, reply)
+                if not sent.get("ok"):
+                    errors.append(sent.get("error", "send failed"))
+                    break
             processed += 1
         self._save_offset()
         return {"ok": not errors, "processed": processed, "errors": errors, "offset": self.offset}
@@ -214,6 +218,44 @@ class TelegramBot:
                 return self._api_payload_error(response.data, "sendMessage")
         return {"ok": True, "chunks": len(chunks)}
 
+    def _reply_batches(self, result: dict[str, Any]) -> list[str]:
+        if not isinstance(result, dict):
+            return ["Nermana hit an internal chat error before a reply was prepared."]
+        if not result.get("ok", True):
+            return [self._short_chat_error(str(result.get("error") or "unknown error"))]
+        model_error = str(result.get("model_error") or result.get("original_model_error") or "")
+        if model_error and not result.get("model_ok", True) and not result.get("tool_results"):
+            return [self._short_chat_error(model_error)]
+        batches = result.get("reply_batches")
+        if isinstance(batches, list) and batches:
+            replies = [str(item).strip() for item in batches if str(item).strip()]
+        else:
+            replies = [str(result.get("reply") or "").strip()]
+        return [self._safe_reply_text(reply) for reply in replies if reply] or ["(empty)"]
+
+    def _safe_reply_text(self, text: str) -> str:
+        if self._is_context_error(text):
+            return self._short_chat_error(text)
+        return text
+
+    def _short_chat_error(self, message: str) -> str:
+        lower = message.lower()
+        if self._is_context_error(message):
+            return (
+                "The local model rejected this turn because llama.cpp is running with too small a context window. "
+                "Open Models > Server and restart it with a larger context, or use the compact phone preset."
+            )
+        if any(part in lower for part in ["connection refused", "failed to establish", "not responding", "timed out", "timeout"]):
+            return "The local model is not reachable right now. Web/core memory still works; start or restart llama.cpp from Models."
+        if "bad request" in lower or "http error 400" in lower:
+            return "The local model rejected the request. Check the active model, server model id, and context size in Models."
+        compact = " ".join(message.split())
+        return f"Nermana hit a chat error: {compact[:220]}"
+
+    def _is_context_error(self, message: str) -> bool:
+        lower = message.lower()
+        return "context" in lower and any(word in lower for word in ["exceed", "available", "tokens", "window"])
+
     def _typing_loop(self, chat_id: int, stop: threading.Event) -> None:
         while not stop.is_set():
             post_json(f"{self.base_url}/sendChatAction", {"chat_id": chat_id, "action": "typing"}, timeout=5)
@@ -231,20 +273,20 @@ class TelegramBot:
         if status == 0 and any(word in lower for word in ["timed out", "timeout", "network", "temporary failure", "name or service", "connection refused", "no route", "unreachable"]):
             return {
                 "ok": False,
-                "error": f"Telegram {action} is offline right now. Internet is missing or Telegram cannot be reached; Nermana will keep local web/core running.",
+                "error": f"Telegram {action} is offline. Internet or Telegram is unreachable; local Nermana stays running.",
                 "status": status,
                 "offline": True,
             }
         if status == 404 or "not found" in lower:
             return {
                 "ok": False,
-                "error": f"Telegram {action} failed: bot not found. Check that the token is the exact BotFather token.",
+                "error": f"Telegram {action} failed: bot not found. Check the BotFather token.",
                 "status": status,
             }
         if status == 401 or "unauthorized" in lower:
             return {
                 "ok": False,
-                "error": f"Telegram {action} failed: token is unauthorized. Recheck the BotFather token.",
+                "error": f"Telegram {action} failed: token unauthorized. Recheck the BotFather token.",
                 "status": status,
             }
         if "conflict" in lower and ("webhook" in lower or "getupdates" in lower):
