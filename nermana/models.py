@@ -6,11 +6,12 @@ import shutil
 import os
 import re
 import signal
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import AppConfig, resolve_path, save_config
+from .config import AppConfig, DATA_DIR, resolve_path, save_config
 from .http_client import get_json, post_json
 
 
@@ -28,6 +29,7 @@ class ModelManager:
         self.config = config
         self.persist = persist
         self._process: subprocess.Popen | None = None
+        self._log_handle: Any | None = None
         self._runtime_cache: dict[str, Any] | None = None
         self._runtime_cache_at = 0.0
 
@@ -71,6 +73,7 @@ class ModelManager:
             "resolved": resolved,
             "available": resolved is not None,
             "candidates": [str(path) for path in self.llama_server_candidates()],
+            "log_path": str(self.server_log_path()),
         }
 
     def resolve_llama_server(self) -> str | None:
@@ -309,6 +312,9 @@ class ModelManager:
         health["started_process"] = self._process.pid if self._process else None
         health["command"] = command
         health["killed_external"] = killed
+        health["log_path"] = str(self.server_log_path())
+        if not health.get("ok"):
+            health["log_tail"] = self.server_log_tail(40)
         return health
 
     def _server_command(self, llama_server: str, model: Path, port: int, fast: bool) -> list[str]:
@@ -339,11 +345,21 @@ class ModelManager:
         return command
 
     def _start_process(self, command: list[str]) -> subprocess.Popen:
-        return subprocess.Popen(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        self._close_log_handle()
+        log_path = self.server_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log_handle = log_path.open("a", encoding="utf-8", buffering=1)
+        self._log_handle.write(f"\n--- llama-server start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        self._log_handle.write("command: " + " ".join(command) + "\n")
+        try:
+            return subprocess.Popen(
+                command,
+                stdout=self._log_handle,
+                stderr=subprocess.STDOUT,
+            )
+        except Exception:
+            self._close_log_handle()
+            raise
 
     def _uses_memory_flags(self, command: list[str]) -> bool:
         return "--mlock" in command or "--no-mmap" in command
@@ -356,7 +372,31 @@ class ModelManager:
             except subprocess.TimeoutExpired:
                 self._process.kill()
         self._process = None
+        self._close_log_handle()
         self.invalidate_runtime_cache()
+
+    def server_log_path(self) -> Path:
+        return DATA_DIR / "logs" / "llama-server.log"
+
+    def server_log_tail(self, lines: int = 80) -> dict[str, Any]:
+        path = self.server_log_path()
+        if not path.exists():
+            return {"ok": True, "path": str(path), "lines": []}
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                tail = list(deque((line.rstrip("\n") for line in handle), maxlen=max(1, int(lines))))
+        except OSError as exc:
+            return {"ok": False, "path": str(path), "error": str(exc), "lines": []}
+        return {"ok": True, "path": str(path), "lines": tail}
+
+    def _close_log_handle(self) -> None:
+        if self._log_handle is None:
+            return
+        try:
+            self._log_handle.close()
+        except OSError:
+            pass
+        self._log_handle = None
 
     def stop_external_server(self, port: int | None = None) -> list[int]:
         port = port or self._port_from_base_url()

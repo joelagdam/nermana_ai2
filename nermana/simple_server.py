@@ -4,6 +4,7 @@ import errno
 import base64
 import json
 import mimetypes
+import shutil
 import threading
 import time
 import uuid
@@ -15,7 +16,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from .agent import AgentCore
 from .capabilities import collect_capabilities
 from .config import default_public_config, merge_config, reset_config_defaults, save_config
-from .model_downloads import download_model, download_preset, list_presets
+from .model_downloads import delete_partial_download, download_model, download_preset, list_partial_downloads, list_presets
 from .telegram_bot import TelegramBot
 from .tools.files import _safe_path
 from .updater import update_status, update_system
@@ -30,6 +31,17 @@ class SimpleNermanaServer:
         self.downloads: dict[str, dict] = {}
         self.download_lock = threading.Lock()
         self.telegram_thread: threading.Thread | None = None
+        self.telegram_stop = threading.Event()
+        self.telegram_lock = threading.Lock()
+        self.telegram_state: dict = {
+            "ok": False,
+            "running": False,
+            "started_at": 0,
+            "last_poll_at": 0,
+            "last_error": "",
+            "processed": 0,
+            "offset": 0,
+        }
 
     def serve(self, host: str, port: int) -> None:
         outer = self
@@ -62,6 +74,7 @@ class SimpleNermanaServer:
             "percent": 0,
             "result": None,
             "error": "",
+            "cancel_requested": False,
             "started_at": time.time(),
             "updated_at": time.time(),
         }
@@ -82,10 +95,21 @@ class SimpleNermanaServer:
         def report(progress: dict) -> None:
             self._update_download(job_id, state="running", message="Downloading", **progress)
 
+        def cancelled() -> bool:
+            with self.download_lock:
+                job = self.downloads.get(job_id) or {}
+                return bool(job.get("cancel_requested"))
+
         self._update_download(job_id, state="running", message="Starting")
         try:
             if body.get("preset_id"):
-                result = download_preset(self.agent.config, str(body.get("preset_id")), select=bool(body.get("select", True)), progress=report)
+                result = download_preset(
+                    self.agent.config,
+                    str(body.get("preset_id")),
+                    select=bool(body.get("select", True)),
+                    progress=report,
+                    cancelled=cancelled,
+                )
             else:
                 result = download_model(
                     self.agent.config,
@@ -93,14 +117,15 @@ class SimpleNermanaServer:
                     str(body.get("filename", "")),
                     select=bool(body.get("select", True)),
                     progress=report,
+                    cancelled=cancelled,
                 )
             if result.get("ok"):
                 save_config(self.agent.config)
-            state = "complete" if result.get("ok") else "error"
+            state = "complete" if result.get("ok") else "cancelled" if result.get("cancelled") else "error"
             updates = {
                 "ok": bool(result.get("ok")),
                 "state": state,
-                "message": "Download complete" if result.get("ok") else "Download failed",
+                "message": "Download complete" if result.get("ok") else "Download cancelled" if result.get("cancelled") else "Download failed",
                 "result": result,
                 "error": result.get("error", ""),
             }
@@ -126,6 +151,18 @@ class SimpleNermanaServer:
             jobs = [dict(job) for job in self.downloads.values()]
         return sorted(jobs, key=lambda job: float(job.get("updated_at") or 0), reverse=True)
 
+    def cancel_model_download(self, job_id: str) -> dict:
+        with self.download_lock:
+            job = self.downloads.get(job_id)
+            if job is None:
+                return {"ok": False, "error": "download job not found"}
+            if job.get("state") not in {"queued", "running"}:
+                return {"ok": False, "error": f"download is already {job.get('state')}"}
+            job["cancel_requested"] = True
+            job["message"] = "Cancel requested"
+            job["updated_at"] = time.time()
+            return {"ok": True, "job": dict(job)}
+
     def dashboard_snapshot(self) -> dict:
         agent_status = self.agent.status()
         capabilities = [
@@ -149,6 +186,7 @@ class SimpleNermanaServer:
             "agent": agent_status,
             "capabilities": capabilities,
             "workers": workers,
+            "telegram": self.telegram_worker_status(),
             "stats": {
                 "workers_total": len(workers),
                 "workers_working": working_count,
@@ -161,6 +199,7 @@ class SimpleNermanaServer:
                 "memory_unconsolidated": self.agent.memory.count_unconsolidated(),
                 "downloads_total": len(downloads),
                 "downloads_active": len(active_downloads),
+                "partials_total": len(list_partial_downloads(self.agent.config)),
                 "model": self.agent.config.model.active_model or "no model selected",
                 "weather_city": self.agent.config.weather.location_name,
                 "allowed_folders": len(self.agent.config.files.allowed_dirs),
@@ -218,7 +257,18 @@ class SimpleNermanaServer:
         capability_worker("Shizuku", "shizuku_rish", "ready")
         tool_worker("Image generation", "generate_image")
         tool_worker("Vision", "vision_analyze")
-        capability_worker("Telegram", "telegram")
+        telegram = self.telegram_worker_status()
+        telegram_cap = caps.get("telegram", {"available": False, "details": "not reported"})
+        if telegram.get("running"):
+            telegram_state = "working"
+            telegram_details = f"processed {telegram.get('processed', 0)} update(s); offset {telegram.get('offset', 0)}"
+        elif self.agent.config.telegram.enabled and self.agent.config.telegram.token:
+            telegram_state = "ready" if telegram_cap.get("available") else "offline"
+            telegram_details = telegram.get("last_error") or telegram_cap.get("details") or "configured"
+        else:
+            telegram_state = "disabled"
+            telegram_details = "disabled or missing token"
+        workers.append({"name": "Telegram", "state": telegram_state, "details": telegram_details})
         for job in active_downloads[:2]:
             workers.append(
                 {
@@ -232,19 +282,62 @@ class SimpleNermanaServer:
     def start_telegram(self) -> dict:
         cfg = self.agent.config.telegram
         if not cfg.enabled or not cfg.token:
+            self._set_telegram_state(ok=False, running=False, last_error="Telegram is disabled or token is missing.")
             return {"ok": False, "error": "Telegram is disabled or token is missing."}
         if self.telegram_thread and self.telegram_thread.is_alive():
-            return {"ok": True, "message": "Telegram polling already running."}
+            return {"ok": True, "message": "Telegram polling already running.", "worker": self.telegram_worker_status()}
         bot = TelegramBot(self.agent)
         status = bot.status()
         if not status.get("ok"):
+            self._set_telegram_state(ok=False, running=False, last_error=status.get("error", "Telegram is not ready."))
             return status
         clear = bot.delete_webhook(drop_pending_updates=False)
         if not clear.get("ok"):
+            self._set_telegram_state(ok=False, running=False, last_error=clear.get("error", "webhook clear failed"))
             return clear
-        self.telegram_thread = threading.Thread(target=bot.run_forever, name="nermana-telegram-web", daemon=True)
+        self.telegram_stop.clear()
+        self._set_telegram_state(ok=True, running=True, started_at=time.time(), last_error="", offset=bot.offset)
+        self.telegram_thread = threading.Thread(target=self._telegram_loop, args=(bot,), name="nermana-telegram-web", daemon=True)
         self.telegram_thread.start()
-        return {"ok": True, "message": "Telegram polling started.", "offset": bot.offset, "bot": status.get("bot"), "webhook": clear}
+        return {"ok": True, "message": "Telegram polling started.", "offset": bot.offset, "bot": status.get("bot"), "webhook": clear, "worker": self.telegram_worker_status()}
+
+    def telegram_worker_status(self) -> dict:
+        with self.telegram_lock:
+            state = dict(self.telegram_state)
+        state["thread_alive"] = bool(self.telegram_thread and self.telegram_thread.is_alive())
+        if not state["thread_alive"] and state.get("running"):
+            state["running"] = False
+            state["ok"] = False
+            state["last_error"] = state.get("last_error") or "Telegram worker stopped."
+        return state
+
+    def stop_workers(self) -> None:
+        self.telegram_stop.set()
+
+    def _telegram_loop(self, bot: TelegramBot) -> None:
+        interval = max(1.0, float(self.agent.config.telegram.poll_interval_seconds))
+        try:
+            while not self.telegram_stop.is_set():
+                try:
+                    result = bot.poll_once(timeout=20)
+                    processed = int(result.get("processed", 0) or 0)
+                    last_error = "" if result.get("ok") else str(result.get("error") or result.get("errors") or "poll failed")
+                    with self.telegram_lock:
+                        self.telegram_state["ok"] = bool(result.get("ok"))
+                        self.telegram_state["running"] = True
+                        self.telegram_state["last_poll_at"] = time.time()
+                        self.telegram_state["last_error"] = last_error
+                        self.telegram_state["processed"] = int(self.telegram_state.get("processed", 0)) + processed
+                        self.telegram_state["offset"] = int(result.get("offset", bot.offset) or 0)
+                except Exception as exc:
+                    self._set_telegram_state(ok=False, running=True, last_poll_at=time.time(), last_error=str(exc), offset=bot.offset)
+                self.telegram_stop.wait(interval)
+        finally:
+            self._set_telegram_state(running=False)
+
+    def _set_telegram_state(self, **updates) -> None:
+        with self.telegram_lock:
+            self.telegram_state.update(updates)
 
 
 class NermanaHandler(BaseHTTPRequestHandler):
@@ -276,20 +369,24 @@ class NermanaHandler(BaseHTTPRequestHandler):
             )
         elif path == "/api/models/health":
             self._json(self.agent.models.runtime_status(force=True))
+        elif path == "/api/models/logs":
+            self._json(self.agent.models.server_log_tail(_query_int(query, "lines", 80, 1, 500)))
         elif path == "/api/models/presets":
             self._json({"presets": list_presets()})
         elif path.startswith("/api/models/downloads/"):
             result = self.server_state.download_status(unquote(path.rsplit("/", 1)[1]))
             status = HTTPStatus.NOT_FOUND if result.get("error") == "download job not found" else HTTPStatus.OK
             self._json(result, status)
+        elif path == "/api/models/download/partials":
+            self._json({"ok": True, "partials": list_partial_downloads(self.agent.config)})
         elif path == "/api/models/llama":
             self._json(self.agent.models.llama_server_status())
         elif path == "/api/tools":
             self._json({"tools": self.agent.tools.list_metadata()})
         elif path == "/api/memory":
-            self._json({"memories": self.agent.memory.list_memories(int(query.get("limit", ["100"])[0]))})
+            self._json({"memories": self.agent.memory.list_memories(_query_int(query, "limit", 100, 1, 500))})
         elif path == "/api/memory/search":
-            self._json({"results": [hit.__dict__ for hit in self.agent.memory.search(query.get("q", [""])[0], int(query.get("limit", ["8"])[0]))]})
+            self._json({"results": [hit.__dict__ for hit in self.agent.memory.search(query.get("q", [""])[0], _query_int(query, "limit", 8, 1, 50))]})
         elif path.startswith("/api/memory/"):
             try:
                 memory_id = int(path.rsplit("/", 1)[1])
@@ -302,12 +399,14 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._json({"sessions": self.agent.memory.list_sessions()})
         elif path.startswith("/api/sessions/") and path.endswith("/messages"):
             session_id = unquote(path.split("/")[3])
-            self._json({"messages": self.agent.memory.get_messages(session_id, int(query.get("limit", ["80"])[0]))})
+            self._json({"messages": self.agent.memory.get_messages(session_id, _query_int(query, "limit", 80, 1, 500))})
         elif path == "/api/logs":
             self._json(
                 {
                     "recent_sessions": self.agent.memory.list_sessions(),
                     "model_health": self.agent.models.runtime_status(),
+                    "llama_log": self.agent.models.server_log_tail(80),
+                    "telegram": self.server_state.telegram_worker_status(),
                     "tools": self.agent.tools.list_metadata(),
                 }
             )
@@ -326,7 +425,10 @@ class NermanaHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path, _ = self._parsed()
-        body = self._body()
+        body, body_error = self._body()
+        if body_error:
+            self._json({"ok": False, "error": body_error}, HTTPStatus.BAD_REQUEST)
+            return
         if path == "/api/chat":
             self._json(self.agent.chat(str(body.get("message", "")), str(body.get("session_id", "web"))))
         elif path == "/api/settings":
@@ -371,6 +473,13 @@ class NermanaHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "llama_server_path": resolved})
         elif path == "/api/models/download/start":
             self._json(self.server_state.start_model_download(body))
+        elif path.startswith("/api/models/downloads/") and path.endswith("/cancel"):
+            job_id = unquote(path.split("/")[-2])
+            result = self.server_state.cancel_model_download(job_id)
+            self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST)
+        elif path == "/api/models/download/partials/delete":
+            result = delete_partial_download(self.agent.config, str(body.get("filename", "")))
+            self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST)
         elif path == "/api/models/download":
             if body.get("preset_id"):
                 result = download_preset(self.agent.config, str(body.get("preset_id")), select=bool(body.get("select", True)))
@@ -396,7 +505,11 @@ class NermanaHandler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": "tool not found"}, HTTPStatus.NOT_FOUND)
         elif path.startswith("/api/tools/") and path.endswith("/run"):
             tool_name = path.split("/")[3]
-            self._json(self.agent.run_tool(tool_name, body.get("payload", {})))
+            payload = body.get("payload", {})
+            if not isinstance(payload, dict):
+                self._json({"ok": False, "error": "tool payload must be a JSON object"}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json(self.agent.run_tool(tool_name, payload))
         elif path == "/api/memory":
             memory_id = self.agent.memory.remember(str(body.get("content", "")), tags=str(body.get("tags", "")), source=str(body.get("source", "web")))
             self._json({"ok": True, "memory_id": memory_id})
@@ -433,7 +546,12 @@ class NermanaHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         path, _ = self._parsed()
         if path.startswith("/api/memory/"):
-            self._json({"ok": self.agent.memory.forget(int(path.rsplit("/", 1)[1]))})
+            try:
+                memory_id = int(path.rsplit("/", 1)[1])
+            except ValueError:
+                self._json({"ok": False, "error": "invalid memory id"}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json({"ok": self.agent.memory.forget(memory_id)})
         else:
             self._json({"ok": False, "error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -455,12 +573,15 @@ class NermanaHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         return parsed.path, parse_qs(parsed.query)
 
-    def _body(self) -> dict:
-        length = int(self.headers.get("content-length", "0") or "0")
+    def _body(self) -> tuple[dict, str]:
+        try:
+            length = int(self.headers.get("content-length", "0") or "0")
+        except ValueError:
+            return {}, "invalid content-length"
         if not length:
-            return {}
+            return {}, ""
         raw = self.rfile.read(length).decode("utf-8", errors="replace")
-        return json.loads(raw) if raw else {}
+        return _decode_json_body(raw)
 
     def _json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = json.dumps(payload).encode("utf-8")
@@ -476,12 +597,7 @@ class NermanaHandler(BaseHTTPRequestHandler):
         if not (target == root or root in target.parents) or not target.exists() or not target.is_file():
             self._json({"ok": False, "error": "not found"}, HTTPStatus.NOT_FOUND)
             return
-        data = target.read_bytes()
-        self.send_response(HTTPStatus.OK.value)
-        self.send_header("Content-Type", mimetypes.guess_type(target.name)[0] or "application/octet-stream")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        self._stream_file(target, mimetypes.guess_type(target.name)[0] or "application/octet-stream")
 
     def _upload_file(self, body: dict) -> dict:
         if not self.agent.config.files.enabled:
@@ -529,13 +645,14 @@ class NermanaHandler(BaseHTTPRequestHandler):
         if not target.exists() or not target.is_file():
             self._json({"ok": False, "error": "file not found"}, HTTPStatus.NOT_FOUND)
             return
-        data = target.read_bytes()
+        size = target.stat().st_size
         self.send_response(HTTPStatus.OK.value)
         self.send_header("Content-Type", mimetypes.guess_type(target.name)[0] or "application/octet-stream")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Content-Disposition", f'attachment; filename="{target.name}"')
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition", f'attachment; filename="{_download_name(target.name)}"')
         self.end_headers()
-        self.wfile.write(data)
+        with target.open("rb") as handle:
+            shutil.copyfileobj(handle, self.wfile, 1024 * 1024)
 
     def _preserve_redacted_secrets(self, patch: dict) -> dict:
         providers = patch.get("providers")
@@ -549,12 +666,45 @@ class NermanaHandler(BaseHTTPRequestHandler):
             telegram["token"] = self.agent.config.telegram.token
         return patch
 
+    def _stream_file(self, target: Path, content_type: str) -> None:
+        size = target.stat().st_size
+        self.send_response(HTTPStatus.OK.value)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(size))
+        self.end_headers()
+        with target.open("rb") as handle:
+            shutil.copyfileobj(handle, self.wfile, 1024 * 1024)
+
     def log_message(self, format: str, *args) -> None:
         return
 
 
 def serve(host: str, port: int) -> None:
     SimpleNermanaServer().serve(host, port)
+
+
+def _decode_json_body(raw: str) -> tuple[dict, str]:
+    if not raw:
+        return {}, ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {}, f"invalid JSON body: {exc.msg}"
+    if not isinstance(data, dict):
+        return {}, "JSON body must be an object"
+    return data, ""
+
+
+def _download_name(name: str) -> str:
+    return Path(name).name.replace('"', "_").replace("\r", "_").replace("\n", "_")
+
+
+def _query_int(query: dict[str, list[str]], key: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(query.get(key, [str(default)])[0])
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
 
 
 def _unique_upload_path(folder: Path, filename: str) -> Path:

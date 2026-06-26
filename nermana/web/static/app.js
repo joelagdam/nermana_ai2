@@ -2,6 +2,7 @@ let config = {};
 let statusCache = {};
 let dashboardCache = {};
 let chatInitiated = false;
+let activeDownloadJobId = "";
 
 const pages = Array.from(document.querySelectorAll(".page"));
 const navButtons = Array.from(document.querySelectorAll("#nav button"));
@@ -220,6 +221,7 @@ async function refreshAll() {
   fillForms();
   renderDashboard(dashboardCache);
   await renderPresets();
+  await renderPartials();
   await renderModels();
   await renderTools();
   await renderMemory();
@@ -453,6 +455,38 @@ function renderDownloads(downloads) {
     const title = job.filename || job.id || "model download";
     const detail = `${job.state || "unknown"} | ${job.percent ? `${Number(job.percent).toFixed(1)}%` : formatTime(job.updated_at)}`;
     list.appendChild(activityItem(title, detail));
+  });
+}
+
+async function renderPartials() {
+  const list = document.getElementById("partialDownloads");
+  if (!list) return;
+  list.innerHTML = "";
+  let data = { partials: [] };
+  try {
+    data = await api("/api/models/download/partials");
+  } catch (error) {
+    list.appendChild(activityItem("Partial downloads unavailable", String(error.message || error)));
+    return;
+  }
+  const partials = data.partials || [];
+  if (!partials.length) {
+    list.appendChild(activityItem("No partial downloads", "Interrupted model downloads will appear here and resume automatically."));
+    return;
+  }
+  partials.forEach((partial) => {
+    const remove = button("Delete Partial", async () => {
+      const ok = window.confirm(`Delete partial download ${partial.partial_name || partial.filename}?`);
+      if (!ok) return;
+      const result = await runAction(
+        "Partial download",
+        () => api("/api/models/download/partials/delete", { method: "POST", body: JSON.stringify({ filename: partial.filename }) }),
+        "Partial deleted"
+      );
+      renderResult("downloadOutput", result);
+      await renderPartials();
+    });
+    list.appendChild(makeRow(partial.filename || partial.partial_name || "partial", formatBytes(partial.size_bytes || 0), [remove], partial.path || ""));
   });
 }
 
@@ -789,6 +823,7 @@ async function renderPresets() {
 }
 
 async function downloadModel(payload) {
+  activeDownloadJobId = "";
   renderDownloadProgress({ state: "queued", message: "Queued", bytes_read: 0, total_bytes: 0, percent: 0 });
   renderResult("downloadOutput", "Download queued.");
   const started = await runAction(
@@ -800,20 +835,26 @@ async function downloadModel(payload) {
     renderResult("downloadOutput", started);
     return started;
   }
+  activeDownloadJobId = started.job_id || "";
   let job = started.job;
   renderDownloadProgress(job);
   renderResult("downloadOutput", job);
-  while (job && !["complete", "error"].includes(job.state)) {
+  while (job && !["complete", "error", "cancelled"].includes(job.state)) {
     await delay(1000);
     job = await api(`/api/models/downloads/${started.job_id}`);
     renderDownloadProgress(job);
     renderResult("downloadOutput", job);
   }
+  activeDownloadJobId = "";
   if (job.state === "complete") {
     showToast("Model download", "Download complete", "success");
     await refreshAll();
+  } else if (job.state === "cancelled") {
+    showToast("Model download", "Download cancelled; partial kept", "error");
+    await renderPartials();
   } else {
     showToast("Model download", job.error || "Download failed", "error");
+    await renderPartials();
   }
   return job.result || job;
 }
@@ -823,6 +864,7 @@ function renderDownloadProgress(job) {
   const title = document.getElementById("downloadProgressTitle");
   const text = document.getElementById("downloadProgressText");
   const bar = document.getElementById("downloadProgressBar");
+  const cancel = document.getElementById("cancelDownloadButton");
   panel.hidden = false;
   const filename = job.filename || "model";
   const bytes = `${formatBytes(job.bytes_read || 0)}${job.total_bytes ? ` / ${formatBytes(job.total_bytes)}` : ""}`;
@@ -833,6 +875,9 @@ function renderDownloadProgress(job) {
     bar.value = Math.max(0, Math.min(100, percent));
   } else {
     bar.removeAttribute("value");
+  }
+  if (cancel) {
+    cancel.hidden = !activeDownloadJobId || !["queued", "running"].includes(job.state || "");
   }
 }
 
@@ -885,6 +930,12 @@ function renderModelRuntime(health) {
   if (health.started_process) {
     node.appendChild(activityItem("Process", `started pid ${health.started_process}`));
   }
+  if (health.log_path) {
+    node.appendChild(activityItem("Log", health.log_path));
+  }
+  (health.log_tail?.lines || []).slice(-4).forEach((line) => {
+    node.appendChild(activityItem("Log line", line));
+  });
 }
 
 document.getElementById("scanModels").addEventListener("click", () => runAction("Models", renderModels, "Models scanned"));
@@ -926,6 +977,16 @@ document.getElementById("modelDownload").addEventListener("submit", async (event
   };
   await downloadModel(payload);
 });
+document.getElementById("cancelDownloadButton").addEventListener("click", async () => {
+  if (!activeDownloadJobId) return;
+  const result = await runAction(
+    "Model download",
+    () => api(`/api/models/downloads/${activeDownloadJobId}/cancel`, { method: "POST" }),
+    "Cancel requested"
+  );
+  renderResult("downloadOutput", result);
+});
+document.getElementById("refreshPartialsButton").addEventListener("click", () => runAction("Partials", renderPartials, "Partials refreshed"));
 document.getElementById("modelSettings").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -1171,6 +1232,19 @@ function renderLogsView(data) {
   const modelPanel = document.createElement("section");
   modelPanel.className = "dashboard-panel";
   modelPanel.appendChild(activityItem("Model health", data.model_health?.ok ? "Ready" : data.model_health?.error || "Unavailable"));
+  const logLines = data.llama_log?.lines || [];
+  modelPanel.appendChild(activityItem("llama.cpp log", data.llama_log?.path || "No log path"));
+  logLines.slice(-8).forEach((line) => {
+    modelPanel.appendChild(activityItem("log", line || ""));
+  });
+  const telegramPanel = document.createElement("section");
+  telegramPanel.className = "dashboard-panel";
+  const telegram = data.telegram || {};
+  telegramPanel.appendChild(activityItem("Telegram worker", telegram.running ? "Polling" : telegram.last_error || "Stopped"));
+  telegramPanel.appendChild(activityItem("Processed", `${telegram.processed || 0} update(s), offset ${telegram.offset || 0}`));
+  if (telegram.last_poll_at) {
+    telegramPanel.appendChild(activityItem("Last poll", formatTime(telegram.last_poll_at)));
+  }
   const sessionPanel = document.createElement("section");
   sessionPanel.className = "dashboard-panel";
   sessionPanel.appendChild(activityItem("Recent sessions", `${(data.recent_sessions || []).length} session(s)`));
@@ -1185,7 +1259,7 @@ function renderLogsView(data) {
   tools.slice(0, 10).forEach((tool) => {
     toolsPanel.appendChild(activityItem(tool.name, `${tool.available ? "Available" : "Unavailable"} | ${tool.details || tool.provider}`));
   });
-  node.append(modelPanel, sessionPanel, toolsPanel);
+  node.append(modelPanel, telegramPanel, sessionPanel, toolsPanel);
 }
 
 async function renderUpdateStatus(refreshRemote = false) {

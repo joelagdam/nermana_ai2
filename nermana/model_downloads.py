@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -64,6 +65,7 @@ def get_preset(preset_id: str) -> ModelPreset | None:
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+CancelCallback = Callable[[], bool]
 
 
 def download_model(
@@ -72,6 +74,7 @@ def download_model(
     filename: str = "",
     select: bool = False,
     progress: ProgressCallback | None = None,
+    cancelled: CancelCallback | None = None,
 ) -> dict[str, Any]:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"}:
@@ -93,24 +96,52 @@ def download_model(
         return {"ok": True, "skipped": True, "path": str(target), "filename": target.name, "size_bytes": size, "total_bytes": size}
 
     partial = target.with_suffix(target.suffix + ".part")
-    request = urllib.request.Request(url, headers={"User-Agent": "Nermana-Termux/0.1"})
+    resume_from = partial.stat().st_size if partial.exists() else 0
+    headers = {"User-Agent": "Nermana-Termux/0.1"}
+    if resume_from:
+        headers["Range"] = f"bytes={resume_from}-"
+    request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response, partial.open("wb") as handle:
-            total = _content_length(response)
-            downloaded = 0
+        with urllib.request.urlopen(request, timeout=30) as response:
+            resume_active = bool(resume_from and getattr(response, "status", 200) == 206)
+            if not resume_active:
+                resume_from = 0
+            total = _download_total(response, resume_from)
+            downloaded = resume_from
+            free_check = _free_space_check(models_dir, max(0, total - downloaded))
+            if free_check:
+                return {**free_check, "partial_path": str(partial), "resume_available": partial.exists()}
             _progress(progress, target_name, downloaded, total)
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                downloaded += len(chunk)
-                _progress(progress, target_name, downloaded, total)
+            mode = "ab" if resume_active else "wb"
+            with partial.open(mode) as handle:
+                while True:
+                    if cancelled and cancelled():
+                        return {
+                            "ok": False,
+                            "cancelled": True,
+                            "error": "download cancelled",
+                            "partial_path": str(partial),
+                            "resume_available": partial.exists(),
+                            "filename": target.name,
+                            "bytes_read": downloaded,
+                            "total_bytes": total,
+                        }
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    downloaded += len(chunk)
+                    _progress(progress, target_name, downloaded, total)
         os.replace(partial, target)
     except Exception as exc:
-        if partial.exists():
-            partial.unlink()
-        return {"ok": False, "error": str(exc)}
+        return {
+            "ok": False,
+            "error": str(exc),
+            "partial_path": str(partial),
+            "resume_available": partial.exists(),
+            "filename": target.name,
+            "bytes_read": partial.stat().st_size if partial.exists() else 0,
+        }
 
     if select:
         config.model.active_model = target.name
@@ -119,16 +150,55 @@ def download_model(
     return {"ok": True, "skipped": False, "path": str(target), "filename": target.name, "size_bytes": size, "total_bytes": size}
 
 
-def download_preset(config: AppConfig, preset_id: str, select: bool = True, progress: ProgressCallback | None = None) -> dict[str, Any]:
+def download_preset(
+    config: AppConfig,
+    preset_id: str,
+    select: bool = True,
+    progress: ProgressCallback | None = None,
+    cancelled: CancelCallback | None = None,
+) -> dict[str, Any]:
     preset = get_preset(preset_id)
     if preset is None:
         return {"ok": False, "error": f"Unknown preset: {preset_id}"}
-    result = download_model(config, preset.url, preset.filename, select=select, progress=progress)
+    result = download_model(config, preset.url, preset.filename, select=select, progress=progress, cancelled=cancelled)
     result["preset"] = asdict(preset)
     if result.get("ok"):
         config.model.context_size = preset.context_size
         config.model.thinking_mode = preset.thinking_mode
     return result
+
+
+def list_partial_downloads(config: AppConfig) -> list[dict[str, Any]]:
+    models_dir = resolve_path(config.model.models_dir)
+    if not models_dir.exists():
+        return []
+    partials = []
+    for path in sorted(models_dir.glob("*.gguf.part")):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        target_name = path.name.removesuffix(".part")
+        partials.append({"filename": target_name, "partial_name": path.name, "path": str(path), "size_bytes": size})
+    return partials
+
+
+def delete_partial_download(config: AppConfig, filename: str) -> dict[str, Any]:
+    target_name = _safe_filename(filename)
+    if not target_name.lower().endswith(".gguf"):
+        return {"ok": False, "error": "partial filename must end with .gguf"}
+    models_dir = resolve_path(config.model.models_dir).resolve()
+    partial = (models_dir / f"{target_name}.part").resolve()
+    if not (partial == models_dir or models_dir in partial.parents):
+        return {"ok": False, "error": "partial path is outside the models folder"}
+    if not partial.exists():
+        return {"ok": False, "error": "partial download not found"}
+    try:
+        size = partial.stat().st_size
+        partial.unlink()
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "deleted": partial.name, "size_bytes": size}
 
 
 def _safe_filename(name: str) -> str:
@@ -142,6 +212,37 @@ def _content_length(response: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _download_total(response: Any, resume_from: int) -> int:
+    content_range = response.headers.get("Content-Range", "")
+    match = re.search(r"/(\d+)$", content_range)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            pass
+    length = _content_length(response)
+    return length + resume_from if resume_from and length else length
+
+
+def _free_space_check(folder: Path, remaining_bytes: int) -> dict[str, Any] | None:
+    if not remaining_bytes:
+        return None
+    try:
+        free = shutil.disk_usage(folder).free
+    except OSError:
+        return None
+    buffer = min(256 * 1024 * 1024, max(32 * 1024 * 1024, remaining_bytes // 20))
+    required = remaining_bytes + buffer
+    if free >= required:
+        return None
+    return {
+        "ok": False,
+        "error": f"not enough free storage: need about {required} bytes, have {free} bytes",
+        "free_bytes": free,
+        "required_bytes": required,
+    }
 
 
 def _progress(progress: ProgressCallback | None, filename: str, bytes_read: int, total_bytes: int) -> None:

@@ -143,7 +143,12 @@
                 <span id="downloadProgressText">Starting</span>
               </div>
               <progress id="downloadProgressBar" max="100" value="0"></progress>
+              <button id="cancelDownloadButton" type="button" hidden>Cancel Download</button>
             </div>
+            <div class="toolbar">
+              <button id="refreshPartialsButton" type="button">Refresh Partials</button>
+            </div>
+            <div id="partialDownloads" class="list"></div>
             <div id="downloadOutput" class="result-panel"></div>
           </div>
           <div class="model-tab" id="modelTab-runtime">

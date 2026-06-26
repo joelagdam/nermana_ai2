@@ -11,11 +11,11 @@ from nermana.agent import AgentCore
 from nermana.capabilities import Capability
 from nermana.config import AppConfig, FileConfig, MemoryConfig, ModelConfig, SafetyConfig, SearchConfig, TelegramConfig, merge_config, reset_config_defaults, save_config
 from nermana.http_client import HttpResponse
-from nermana.model_downloads import download_model, list_presets
+from nermana.model_downloads import delete_partial_download, download_model, list_partial_downloads, list_presets
 from nermana.memory import MemoryStore
 from nermana.models import ModelManager
 from nermana.safety import DecisionGate
-from nermana.simple_server import SimpleNermanaServer
+from nermana.simple_server import SimpleNermanaServer, _decode_json_body, _query_int
 from nermana.startup import StartupManager
 from nermana.telegram_bot import TelegramBot
 from nermana.tooling import Tool, ToolRegistry
@@ -148,6 +148,56 @@ class ModelTests(unittest.TestCase):
             self.assertEqual(updates[-1]["bytes_read"], 5)
             self.assertEqual(updates[-1]["percent"], 100)
 
+    def test_model_download_resumes_partial_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "models"
+            model_dir.mkdir()
+            partial = model_dir / "resume.gguf.part"
+            partial.write_bytes(b"ab")
+            cfg = AppConfig(model=ModelConfig(models_dir=str(model_dir)))
+            response = FakeUrlResponse([b"cd", b""], {"Content-Range": "bytes 2-3/4"})
+            response.status = 206
+            captured = {}
+
+            def fake_urlopen(request, timeout=30):
+                captured["range"] = request.get_header("Range")
+                return response
+
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                result = download_model(cfg, "https://example.com/resume.gguf")
+            self.assertTrue(result["ok"])
+            self.assertEqual(captured["range"], "bytes=2-")
+            self.assertEqual((model_dir / "resume.gguf").read_bytes(), b"abcd")
+
+    def test_model_download_cancel_keeps_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "models"
+            cfg = AppConfig(model=ModelConfig(models_dir=str(model_dir)))
+            response = FakeUrlResponse([b"ab", b"cd", b""], {"Content-Length": "4"})
+            calls = {"count": 0}
+
+            def cancel_after_first_check() -> bool:
+                calls["count"] += 1
+                return calls["count"] > 1
+
+            with patch("urllib.request.urlopen", return_value=response):
+                result = download_model(cfg, "https://example.com/cancel.gguf", cancelled=cancel_after_first_check)
+            self.assertFalse(result["ok"])
+            self.assertTrue(result["cancelled"])
+            self.assertTrue((model_dir / "cancel.gguf.part").exists())
+            self.assertEqual(list_partial_downloads(cfg)[0]["filename"], "cancel.gguf")
+
+    def test_delete_partial_download(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "models"
+            model_dir.mkdir()
+            partial = model_dir / "old.gguf.part"
+            partial.write_bytes(b"partial")
+            cfg = AppConfig(model=ModelConfig(models_dir=str(model_dir)))
+            result = delete_partial_download(cfg, "old.gguf")
+            self.assertTrue(result["ok"])
+            self.assertFalse(partial.exists())
+
     def test_llama_command_uses_fast_phone_settings(self) -> None:
         cfg = AppConfig(model=ModelConfig(threads=0, batch_size=256, ubatch_size=64, parallel_slots=1, mlock=True, no_mmap=True))
         manager = ModelManager(cfg, persist=False)
@@ -193,6 +243,18 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(result["server_context_size"], 512)
         self.assertEqual(result["configured_context_size"], 4096)
         self.assertIn("Restart llama.cpp", result["context_warning"])
+
+    def test_server_log_tail_reads_recent_llama_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig()
+            manager = ModelManager(cfg, persist=False)
+            with patch("nermana.models.DATA_DIR", Path(tmp)):
+                log_path = manager.server_log_path()
+                log_path.parent.mkdir(parents=True)
+                log_path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+                result = manager.server_log_tail(2)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["lines"], ["two", "three"])
 
 
 class MemoryTests(unittest.TestCase):
@@ -621,6 +683,22 @@ class TelegramTests(unittest.TestCase):
 
 
 class StartupTests(unittest.TestCase):
+    def test_decode_json_body_rejects_invalid_payloads(self) -> None:
+        body, error = _decode_json_body("{bad")
+        self.assertEqual(body, {})
+        self.assertIn("invalid JSON", error)
+        body, error = _decode_json_body("[]")
+        self.assertEqual(body, {})
+        self.assertIn("object", error)
+        body, error = _decode_json_body('{"ok": true}')
+        self.assertEqual(body, {"ok": True})
+        self.assertEqual(error, "")
+
+    def test_query_int_uses_default_and_clamps(self) -> None:
+        self.assertEqual(_query_int({"limit": ["bad"]}, "limit", 10, 1, 20), 10)
+        self.assertEqual(_query_int({"limit": ["999"]}, "limit", 10, 1, 20), 20)
+        self.assertEqual(_query_int({"limit": ["0"]}, "limit", 10, 1, 20), 1)
+
     def test_startup_reads_server_env_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
@@ -641,6 +719,28 @@ class StartupTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as raised:
                     server.serve("127.0.0.1", 8765)
             self.assertEqual(raised.exception.code, 98)
+
+    def test_server_tracks_telegram_worker_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", offset_path=str(Path(tmp) / "offset.txt"), poll_interval_seconds=1),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            server = SimpleNermanaServer(AgentCore(cfg))
+
+            def poll_once(bot, timeout=20):
+                server.telegram_stop.set()
+                return {"ok": True, "processed": 2, "offset": 9}
+
+            with patch.object(TelegramBot, "status", return_value={"ok": True, "bot": {"username": "nermana"}}), patch.object(
+                TelegramBot, "delete_webhook", return_value={"ok": True}
+            ), patch.object(TelegramBot, "poll_once", poll_once):
+                result = server.start_telegram()
+                server.telegram_thread.join(timeout=3)
+            state = server.telegram_worker_status()
+            self.assertTrue(result["ok"])
+            self.assertEqual(state["processed"], 2)
+            self.assertEqual(state["offset"], 9)
 
 
 class DashboardTests(unittest.TestCase):

@@ -38,6 +38,16 @@ def register_phone_tools(registry: ToolRegistry, config: AppConfig) -> None:
                 pass
         return {"ok": True, "battery": battery, "termux": termux_available()[1], "shizuku": shizuku_available()[1]}
 
+    def phone_status_available() -> tuple[bool, str]:
+        if not config.phone.enabled:
+            return False, "phone control disabled"
+        termux_ok, termux_details = termux_available()
+        shizuku_ok, shizuku_details = shizuku_available()
+        state = "; ".join([f"Termux: {termux_details}", f"Shizuku: {shizuku_details}"])
+        if termux_ok or shizuku_ok:
+            return True, state
+        return True, f"diagnostic only; {state}"
+
     def open_url(payload: dict) -> dict:
         url = str(payload.get("url", "")).strip()
         if not url:
@@ -97,7 +107,7 @@ def register_phone_tools(registry: ToolRegistry, config: AppConfig) -> None:
             offline_required=True,
             risk="read",
             handler=phone_status,
-            availability=lambda: (config.phone.enabled, "phone control enabled" if config.phone.enabled else "phone control disabled"),
+            availability=phone_status_available,
         )
     )
     registry.register(

@@ -8,12 +8,12 @@ from typing import Any
 from .agent import AgentCore
 from .config import load_config, save_config
 from .simple_server import SimpleNermanaServer
-from .telegram_bot import TelegramBot
 
 
 class StartupManager:
     def __init__(self):
         self.agent = AgentCore(load_config())
+        self.web_server = SimpleNermanaServer(self.agent)
         self.web_host, self.web_port = self._server_binding()
         self.telegram_thread: threading.Thread | None = None
         self.memory_thread: threading.Thread | None = None
@@ -71,13 +71,10 @@ class StartupManager:
         if not cfg.enabled or not cfg.token:
             print("telegram: disabled")
             return
-        bot = TelegramBot(self.agent)
-        status = bot.status()
-        if not status.get("ok"):
-            print(f"telegram: {status.get('error', 'not ready')}")
+        result = self.web_server.start_telegram()
+        if not result.get("ok"):
+            print(f"telegram: {result.get('error', 'not ready')}")
             return
-        self.telegram_thread = threading.Thread(target=bot.run_forever, name="nermana-telegram", daemon=True)
-        self.telegram_thread.start()
         print("telegram: polling")
 
     def _start_memory_if_available(self) -> None:
@@ -103,11 +100,10 @@ class StartupManager:
     def _serve_web(self) -> None:
         host = self.web_host
         port = self.web_port
-        server = SimpleNermanaServer(self.agent)
         self._install_signal_handlers()
         print("web: starting")
         try:
-            server.serve(host, port)
+            self.web_server.serve(host, port)
         finally:
             self.shutdown()
 
@@ -122,6 +118,7 @@ class StartupManager:
 
     def shutdown(self) -> None:
         self.stop_event.set()
+        self.web_server.stop_workers()
         if self.model_started:
             self.agent.models.stop_server()
 
