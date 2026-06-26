@@ -250,15 +250,17 @@ function renderStatusPills(status) {
   const internet = caps.find((cap) => cap.name === "internet");
   const llama = caps.find((cap) => cap.name === "llama_server_binary");
   const localModel = status.agent?.model_health;
+  const modelWarn = Boolean(localModel?.context_mismatch);
   statusPills.innerHTML = "";
   statusPills.append(
     pill(internet?.available ? "Online" : "Offline", internet?.available ? "good" : "off"),
-    pill(localModel?.ok ? "Model ready" : localModel?.endpoint_ok ? "Chat failed" : "Model off", localModel?.ok ? "good" : localModel?.endpoint_ok ? "warn" : "off"),
+    pill(modelWarn ? "Context mismatch" : localModel?.ok ? "Model ready" : localModel?.endpoint_ok ? "Chat failed" : "Model off", modelWarn ? "warn" : localModel?.ok ? "good" : localModel?.endpoint_ok ? "warn" : "off"),
     pill(llama?.available ? "llama found" : "llama missing", llama?.available ? "good" : "off")
   );
 }
 
 function modelStateText(health) {
+  if (health?.context_mismatch) return "context mismatch";
   if (health?.ok) return "model ready";
   if (health?.endpoint_ok) return "model chat failed";
   return "model unavailable";

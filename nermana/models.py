@@ -164,7 +164,7 @@ class ModelManager:
     def server_health(self) -> dict[str, Any]:
         response = get_json(f"{self.config.model.base_url.rstrip('/')}/models", timeout=2)
         if response.ok:
-            return {
+            health = {
                 "ok": True,
                 "endpoint_ok": True,
                 "ready": None,
@@ -173,6 +173,8 @@ class ModelManager:
                 "chat_model": self._chat_model_name(response.data),
                 "state": "endpoint reachable; chat not checked",
             }
+            self._attach_context_status(health, models_data=response.data)
+            return health
         return {"ok": False, "endpoint_ok": False, "ready": False, "base_url": self.config.model.base_url, "error": response.error, "state": "offline"}
 
     def runtime_status(self, force: bool = False, max_age_seconds: float = 8.0) -> dict[str, Any]:
@@ -207,11 +209,12 @@ class ModelManager:
         self._runtime_cache = None
         self._runtime_cache_at = 0.0
 
-    def _attach_context_status(self, health: dict[str, Any], error: str) -> None:
-        available = self._available_context_from_error(error)
+    def _attach_context_status(self, health: dict[str, Any], error: str = "", models_data: Any = None) -> None:
+        available = self._available_context_from_error(error) or self._server_context_from_models(models_data if models_data is not None else health.get("data"))
         configured = int(self.config.model.context_size or 0)
         if not available:
             health["configured_context_size"] = configured
+            health["context_mismatch"] = False
             return
         health["server_context_size"] = available
         health["configured_context_size"] = configured
@@ -221,6 +224,30 @@ class ModelManager:
                 f"llama.cpp is serving {available} tokens, but Nermana is configured for {configured}. "
                 "Restart llama.cpp from Models or termux_start_all.sh so the saved context is applied."
             )
+
+    def _server_context_from_models(self, models_data: Any) -> int | None:
+        if not isinstance(models_data, dict):
+            return None
+        for collection_name in ("data", "models"):
+            items = models_data.get(collection_name)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                containers = [item.get("meta"), item.get("details"), item]
+                for container in containers:
+                    if not isinstance(container, dict):
+                        continue
+                    for key in ("n_ctx", "context_size", "context_length", "num_ctx"):
+                        value = container.get(key)
+                        try:
+                            parsed = int(value)
+                        except (TypeError, ValueError):
+                            continue
+                        if parsed > 0:
+                            return parsed
+        return None
 
     def _available_context_from_error(self, error: str) -> int | None:
         match = re.search(r"available context size\s*\((\d+)\s+tokens?\)", str(error or ""), re.I)

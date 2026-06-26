@@ -244,6 +244,19 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(result["configured_context_size"], 4096)
         self.assertIn("Restart llama.cpp", result["context_warning"])
 
+    def test_runtime_status_reports_advertised_context_mismatch(self) -> None:
+        cfg = AppConfig(model=ModelConfig(active_model="active.gguf", context_size=4096))
+        manager = ModelManager(cfg, persist=False)
+        models = HttpResponse(True, 200, {"data": [{"id": "active.gguf", "meta": {"n_ctx": 1024}}]})
+        good = HttpResponse(True, 200, {"choices": [{"message": {"content": "OK"}}]})
+        with patch("nermana.models.get_json", return_value=models), patch("nermana.models.post_json", return_value=good):
+            result = manager.runtime_status(force=True)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["context_mismatch"])
+        self.assertEqual(result["server_context_size"], 1024)
+        self.assertEqual(result["configured_context_size"], 4096)
+        self.assertIn("Restart llama.cpp", result["context_warning"])
+
     def test_server_log_tail_reads_recent_llama_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig()
@@ -472,6 +485,47 @@ class AgentTests(unittest.TestCase):
                 result = agent.chat(f"/read {note}", session_id="test")
             self.assertTrue(result["ok"])
             self.assertIn("offline file", result["reply"])
+
+    def test_agent_prefers_successful_search_over_model_denial(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            search_result = {
+                "ok": True,
+                "tool": "web_search",
+                "provider": "duckduckgo",
+                "query": "Nermana AI Termux",
+                "results": [{"title": "Nermana", "url": "https://example.test/nermana", "content": "Offline-first Termux phone AI."}],
+            }
+            denial = "I'm not able to perform the search operation. Let me know if there's anything else I can assist you with!"
+            with patch.object(agent.tools, "run", return_value=search_result), patch.object(agent.models, "chat", return_value={"ok": True, "content": denial}):
+                result = agent.chat("/search Nermana AI Termux", session_id="search-denial")
+            self.assertTrue(result["ok"])
+            self.assertIn("I found 1 duckduckgo result", result["reply"])
+            self.assertNotIn("not able to perform", result["reply"].lower())
+
+    def test_agent_filters_diagnostic_fallback_from_prompt_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")), model=ModelConfig(context_size=4096))
+            agent = AgentCore(cfg)
+            agent.memory.add_message("web", "user", "hello")
+            agent.memory.add_message(
+                "web",
+                "assistant",
+                "I am here. My core is awake even when the larger voice engine stumbles. I can still remember, check tools, and help bring the GGUF model back online.",
+            )
+            captured = []
+
+            def fake_chat(messages, max_tokens=512):
+                captured.append(messages)
+                return {"ok": True, "content": "Fresh answer."}
+
+            with patch.object(agent.models, "chat", side_effect=fake_chat):
+                result = agent.chat("hello again", session_id="web")
+            prompt_text = str(captured[0])
+            self.assertEqual(result["reply"], "Fresh answer.")
+            self.assertNotIn("larger voice engine stumbles", prompt_text)
+            self.assertNotIn("GGUF model back online", prompt_text)
 
     def test_agent_runs_safe_semi_auto_tool_without_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

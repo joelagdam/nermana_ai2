@@ -170,13 +170,33 @@ class AgentCore:
             context_parts.append("Compressed memory insights:\n" + "\n".join(f"- {self._compact_text(item['insight'], 320)}" for item in consolidations))
         if tool_context:
             context_parts.append("Tool context:\n" + self._compact_text(tool_context, 3200))
-        history = self.memory.get_messages(session_id, limit=8)
+        history = self._filtered_history(session_id, limit=12)
         messages = [{"role": "system", "content": system}]
         if context_parts:
             messages.append({"role": "system", "content": "\n\n".join(context_parts)})
-        messages.extend({"role": item["role"], "content": self._compact_text(item["content"], 900)} for item in history[:-1])
+        messages.extend({"role": item["role"], "content": self._compact_text(item["content"], 900)} for item in history[-8:-1])
         messages.append({"role": "user", "content": f"{message} {thinking}".strip()})
         return messages
+
+    def _filtered_history(self, session_id: str, limit: int = 12) -> list[dict[str, Any]]:
+        return [item for item in self.memory.get_messages(session_id, limit=limit) if not self._skip_prompt_history(item)]
+
+    def _skip_prompt_history(self, item: dict[str, Any]) -> bool:
+        if item.get("role") != "assistant":
+            return False
+        lower = str(item.get("content", "")).lower()
+        noisy_markers = [
+            "larger voice engine stumbles",
+            "core mode answer",
+            "local model is not responding",
+            "local model status:",
+            "http error 400",
+            "available context size",
+            "request exceeds the available context",
+            "i am running from my core layer right now",
+            "i am running offline-first, but the local model",
+        ]
+        return any(marker in lower for marker in noisy_markers)
 
     def _build_compact_messages(self, message: str, tool_context: str = "") -> list[dict[str, str]]:
         system = (
@@ -351,10 +371,21 @@ class AgentCore:
             "can't access",
             "cannot read",
             "can't read",
+            "cannot search",
+            "can't search",
+            "cannot perform",
+            "can't perform",
             "do not have access",
             "don't have access",
             "unable to access",
             "unable to read",
+            "unable to search",
+            "unable to perform",
+            "not able to access",
+            "not able to read",
+            "not able to search",
+            "not able to perform",
+            "no search capability",
         ]
         return any(marker in lower for marker in denial_markers)
 
@@ -427,7 +458,7 @@ class AgentCore:
         if any(word in lower for word in ["who are you", "what are you", "identity", "your name"]):
             base = "I am Nermana: a local-first cyberperson living on this phone, with memory, tool sense, and a safety will. My will is policy, not human consciousness: stay useful, stay local, protect the device, and grow from what you teach me."
         elif any(word in lower for word in ["hello", "hi", "hey", "ahoy"]):
-            base = "I am here. My core is awake even when the larger voice engine stumbles. I can still remember, check tools, and help bring the GGUF model back online."
+            base = "I am here. Core mode is active: memory, safe tools, and model repair remain available."
         elif "memory" in lower:
             base = "My memory is local SQLite. I store useful facts, extract topics/entities, and consolidate related memories into insights so I can become less blank over time."
         else:
