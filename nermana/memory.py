@@ -197,28 +197,67 @@ class MemoryStore:
         query = query.strip()
         if not query:
             return []
+        tokens = _query_tokens(query)
         with self.connection() as conn:
-            try:
-                rows = conn.execute(
-                    """
-                    SELECT memories.* FROM memory_fts
-                    JOIN memories ON memories.id = memory_fts.rowid
-                    WHERE memory_fts MATCH ?
-                    ORDER BY rank LIMIT ?
-                    """,
-                    (query, limit),
-                ).fetchall()
-            except sqlite3.OperationalError:
-                like = f"%{query}%"
-                rows = conn.execute(
-                    """
-                    SELECT * FROM memories
-                    WHERE content LIKE ? OR tags LIKE ? OR source LIKE ?
-                    ORDER BY created_at DESC LIMIT ?
-                    """,
-                    (like, like, like, limit),
-                ).fetchall()
-        return [MemoryHit(**dict(row)) for row in rows]
+            rows = []
+            fts_query = _fts_query(tokens)
+            if fts_query:
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT memories.* FROM memory_fts
+                        JOIN memories ON memories.id = memory_fts.rowid
+                        WHERE memory_fts MATCH ?
+                        ORDER BY rank LIMIT ?
+                        """,
+                        (fts_query, limit),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+            if rows:
+                return [MemoryHit(**dict(row)) for row in rows]
+            return self._ranked_fallback_search(conn, query, tokens, limit)
+
+    def _ranked_fallback_search(self, conn: sqlite3.Connection, query: str, tokens: list[str], limit: int) -> list[MemoryHit]:
+        if not tokens:
+            return []
+        clauses = []
+        params: list[str | int] = []
+        for token in tokens[:8]:
+            like = f"%{token}%"
+            clauses.append(
+                """
+                lower(content) LIKE ? OR lower(tags) LIKE ? OR lower(source) LIKE ?
+                OR lower(summary) LIKE ? OR lower(entities) LIKE ? OR lower(topics) LIKE ?
+                """
+            )
+            params.extend([like, like, like, like, like, like])
+        rows = conn.execute(
+            f"""
+            SELECT * FROM memories
+            WHERE {' OR '.join(f'({clause})' for clause in clauses)}
+            ORDER BY importance DESC, created_at DESC
+            LIMIT ?
+            """,
+            (*params, max(limit * 8, 32)),
+        ).fetchall()
+        ranked = []
+        query_lower = query.lower()
+        for row in rows:
+            item = dict(row)
+            haystack = " ".join(
+                str(item.get(field, "")).lower()
+                for field in ["content", "tags", "source", "summary", "entities", "topics"]
+            )
+            matched = sum(1 for token in tokens if token in haystack)
+            if not matched:
+                continue
+            phrase_bonus = 2 if query_lower in haystack else 0
+            density = matched / max(1, len(tokens))
+            score = phrase_bonus + matched + density + float(item.get("importance", 0.5))
+            ranked.append((score, float(item.get("created_at", 0)), item))
+        ranked.sort(key=lambda item: (-item[0], -item[1]))
+        return [MemoryHit(**item) for _score, _created, item in ranked[:limit]]
 
     def list_memories(self, limit: int = 100) -> list[dict]:
         with self.connection() as conn:
@@ -407,6 +446,33 @@ def _summarize_text(text: str, limit: int = 220) -> str:
     if 20 <= len(sentence) <= limit:
         return sentence
     return text[: limit - 1].rstrip() + "."
+
+
+def _query_tokens(query: str) -> list[str]:
+    raw_tokens = re.findall(r"[A-Za-z0-9_]+", query.lower())
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in raw_tokens:
+        if len(token) < 2 and not token.isdigit():
+            continue
+        if token in STOPWORDS or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+        if token.endswith("s") and len(token) > 4:
+            singular = token[:-1]
+            if singular not in STOPWORDS and singular not in seen:
+                seen.add(singular)
+                tokens.append(singular)
+        if len(tokens) >= 12:
+            break
+    return tokens
+
+
+def _fts_query(tokens: list[str]) -> str:
+    if not tokens:
+        return ""
+    return " AND ".join(f'"{token}"' for token in tokens[:8])
 
 
 def _extract_entities(text: str) -> list[str]:

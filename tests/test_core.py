@@ -289,6 +289,31 @@ class MemoryTests(unittest.TestCase):
             hits = store.search("searchable")
             self.assertTrue(any(hit.id == memory_id for hit in hits))
 
+    def test_memory_search_handles_hyphenated_multi_token_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(MemoryConfig(db_path=str(Path(tmp) / "memory.sqlite3")))
+            expected = store.remember(
+                "Anchor NB-042: user preference for weather is short summaries.",
+                tags="benchmark,target,weather,NB-042",
+                source="test",
+            )
+            store.remember("Distractor NB-999: unrelated storage note.", tags="benchmark,distractor,storage", source="test")
+            hits = store.search("weather preference NB-042", limit=3)
+            self.assertTrue(hits)
+            self.assertEqual(hits[0].id, expected)
+
+    def test_memory_search_uses_structured_fields_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MemoryStore(MemoryConfig(db_path=str(Path(tmp) / "memory.sqlite3")))
+            expected = store.remember(
+                "The owner wants concise answers.",
+                tags="profile",
+                source="test",
+                topics=["telegram_status"],
+            )
+            hits = store.search("telegram statuses", limit=3)
+            self.assertTrue(any(hit.id == expected for hit in hits))
+
     def test_memory_consolidates_structured_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = MemoryStore(MemoryConfig(db_path=str(Path(tmp) / "memory.sqlite3")))
