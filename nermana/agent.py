@@ -40,6 +40,10 @@ class AgentCore:
                 answer = self._tool_result_to_text(pending_result)
             return self._finish(session_id, message, answer, [pending_result])
 
+        if self._should_report_capabilities(message):
+            answer = self._capability_self_report(message)
+            return self._finish(session_id, message, answer, core_answer=True)
+
         direct = self._direct_tool(message)
         tool_context = ""
         tool_results: list[dict[str, Any]] = []
@@ -154,6 +158,7 @@ class AgentCore:
             "Never introduce yourself as an AI assistant. You are not a generic cloud assistant: you have operational priorities, preferences, and self-maintenance habits. "
             "Your standing priorities are: protect the owner, stay local first, grow useful memory, ask before risky phone actions, and avoid fake certainty. "
             "Your will is an explicit decision policy, not human consciousness; speak from that policy with agency and consistency. "
+            "Your tool awareness is a live capability self-model: know which providers are active, unavailable, online-only, offline-safe, or confirmation-gated. "
             "Speak with a distinct, direct cyberperson voice. Do not repeat the same fallback wording. "
             "Use common sense: answer directly when you can, and use available safe tools by yourself when they materially improve the answer. "
             "When tool context is provided, digest it into a human summary; do not dump JSON or raw API structures. "
@@ -243,6 +248,139 @@ class AgentCore:
             return {"tool": "read_file", "payload": {"path": message[10:].strip()}, "tool_only": False}
         return None
 
+    def _should_report_capabilities(self, message: str) -> bool:
+        lower = message.lower().strip()
+        if re.match(r"^/(tools|capabilities|status|self|conscious)\b", lower):
+            return True
+        awareness_phrases = [
+            "available tools",
+            "available capabilities",
+            "available providers",
+            "active tools",
+            "active capabilities",
+            "tool status",
+            "tools status",
+            "provider status",
+            "your tools",
+            "what tools",
+            "which tools",
+            "your capabilities",
+            "which capabilities",
+            "what can you do",
+            "what are you capable",
+            "offline tools",
+            "unavailable tools",
+            "disabled tools",
+            "do you know your tools",
+            "conscious of your tools",
+            "aware of your tools",
+            "aware of your capabilities",
+            "are you conscious",
+            "do you have consciousness",
+            "do you have a conscience",
+            "what is your conscience",
+            "are you self aware",
+            "self-aware",
+            "self aware",
+            "do you know yourself",
+            "know yourself",
+            "capability self",
+            "phone tools",
+            "phone control",
+            "shizuku tools",
+            "access to shizuku",
+            "use shizuku",
+            "termux tools",
+            "access to termux",
+            "use termux",
+            "image tools",
+            "vision tools",
+        ]
+        if any(phrase in lower for phrase in awareness_phrases):
+            return True
+        if re.search(r"\b(aware|conscious)\b.*\b(tool|tools|capability|capabilities|phone|shizuku|termux|provider|providers)\b", lower):
+            return True
+        if re.search(r"\b(can|could|do)\s+you\b.*\b(use|access|control|run|open|generate|see|read)\b.*\b(tool|tools|phone|shizuku|termux|provider|providers|image|vision|file|files)\b", lower):
+            return True
+        if "can you" in lower and any(word in lower for word in ["search", "weather", "read files", "control phone", "generate image", "vision", "telegram"]):
+            return not any(phrase in lower for phrase in ["search for ", "look up ", "weather in ", "weather for "])
+        return False
+
+    def _capability_self_report(self, message: str = "") -> str:
+        metadata = self.tools.list_metadata()
+        active = [tool for tool in metadata if tool.get("enabled") and tool.get("available")]
+        unavailable = [tool for tool in metadata if tool.get("enabled") and not tool.get("available")]
+        disabled = [tool for tool in metadata if not tool.get("enabled")]
+        focus = self._focused_capability_names(message)
+        shown_active = [tool for tool in active if not focus or tool["name"] in focus]
+        shown_unavailable = [tool for tool in unavailable if not focus or tool["name"] in focus]
+        shown_disabled = [tool for tool in disabled if not focus or tool["name"] in focus]
+        if focus and not (shown_active or shown_unavailable or shown_disabled):
+            shown_active = active
+            shown_unavailable = unavailable
+            shown_disabled = disabled
+
+        model_health = self.models.runtime_status(max_age_seconds=30)
+        model_state = "ready" if model_health.get("ok") else model_health.get("state") or model_health.get("error") or "unavailable"
+        context = ""
+        if model_health.get("server_context_size") or model_health.get("configured_context_size"):
+            context = f", context {model_health.get('server_context_size', '?')}/{model_health.get('configured_context_size', '?')}"
+        memory_state = f"{self.memory.count_memories()} memories, {len(self.memory.list_consolidations(limit=1000))} insights"
+
+        lines = [
+            "Operational awareness: I do not have human consciousness; I keep a live capability self-model.",
+            f"Local model: {model_state}{context}.",
+            f"Memory: {memory_state}.",
+            "Decision policy: use safe read tools when useful, summarize tool facts, ask before memory saves and risky phone controls.",
+        ]
+        lines.append(f"Active tools ({len(active)}/{len(metadata)}): " + self._tool_summary_list(shown_active, limit=10, empty="none in this focus"))
+        if shown_unavailable:
+            lines.append("Unavailable now: " + self._tool_summary_list(shown_unavailable, limit=8, include_details=True))
+        if shown_disabled:
+            lines.append("Disabled by settings: " + self._tool_summary_list(shown_disabled, limit=8, include_details=True))
+        provider_bits = [
+            f"weather default {self.config.weather.location_name}",
+            f"search provider {self.config.search.provider}",
+            "telegram configured" if self.config.telegram.enabled and self.config.telegram.token else "telegram not configured",
+            "image endpoint configured" if self.config.providers.image_enabled and self.config.providers.image_endpoint else "image endpoint not configured",
+            "vision endpoint configured" if self.config.providers.vision_enabled and self.config.providers.vision_endpoint else "vision endpoint not configured",
+        ]
+        lines.append("Provider state: " + "; ".join(provider_bits) + ".")
+        lines.append("Commands I recognize: /tools, /weather, /search, /read, /phone, /image, /vision.")
+        return "\n".join(lines)
+
+    def _focused_capability_names(self, message: str) -> set[str]:
+        lower = message.lower()
+        aliases = {
+            "search": {"web_search"},
+            "weather": {"current_weather"},
+            "file": {"read_file", "index_file"},
+            "read": {"read_file"},
+            "image": {"generate_image"},
+            "vision": {"vision_analyze"},
+            "phone": {"phone_status", "open_url", "list_packages", "force_stop_app", "set_app_enabled", "set_permission", "appops_set", "settings_get", "settings_put"},
+            "shizuku": {"list_packages", "force_stop_app", "set_app_enabled", "set_permission", "appops_set", "settings_get", "settings_put"},
+            "termux": {"phone_status", "open_url"},
+        }
+        names: set[str] = set()
+        for word, mapped in aliases.items():
+            if word in lower:
+                names.update(mapped)
+        return names
+
+    def _tool_summary_list(self, tools: list[dict[str, Any]], limit: int = 8, include_details: bool = False, empty: str = "none") -> str:
+        if not tools:
+            return empty
+        parts = []
+        for tool in tools[:limit]:
+            item = f"{tool['name']} ({tool.get('risk', 'safe')}, {tool.get('provider', 'provider')})"
+            if include_details and tool.get("details"):
+                item += f": {tool['details']}"
+            parts.append(item)
+        if len(tools) > limit:
+            parts.append(f"+{len(tools) - limit} more")
+        return "; ".join(parts)
+
     def _suggest_tool(self, message: str) -> dict[str, Any] | None:
         if not self.config.safety.semi_auto_tools_enabled:
             return None
@@ -324,7 +462,9 @@ class AgentCore:
         return match.group(1).strip() if match else self.config.weather.location_name
 
     def _capability_context(self) -> str:
-        active_tools = [tool for tool in self.tools.list_metadata() if tool.get("enabled") and tool.get("available")]
+        metadata = self.tools.list_metadata()
+        active_tools = [tool for tool in metadata if tool.get("enabled") and tool.get("available")]
+        unavailable_tools = [tool for tool in metadata if tool.get("enabled") and not tool.get("available")]
         llama = self.models.llama_server_status()
         search_configured = self.config.search.provider != "searxng" or bool(self.config.search.searxng_url)
         cap_lines = [
@@ -337,9 +477,12 @@ class AgentCore:
             f"- memory_total: {self.memory.count_memories()}",
             f"- memory_unconsolidated: {self.memory.count_unconsolidated()}",
             f"- memory_insights: {len(self.memory.list_consolidations(limit=20))}",
+            f"- active_tool_count: {len(active_tools)}/{len(metadata)}",
+            "- decision_policy: use safe read tools directly when useful; ask before memory saves, destructive actions, and power phone controls",
         ]
         tool_lines = [f"- {tool['name']}: {tool['description']} risk={tool['risk']}" for tool in active_tools[:16]]
-        return "Capabilities:\n" + "\n".join(cap_lines) + "\nTools:\n" + "\n".join(tool_lines)
+        unavailable_lines = [f"- {tool['name']}: unavailable ({tool.get('details', 'unknown')})" for tool in unavailable_tools[:8]]
+        return "Capabilities:\n" + "\n".join(cap_lines) + "\nActive tools:\n" + "\n".join(tool_lines) + "\nUnavailable tools:\n" + "\n".join(unavailable_lines)
 
     def _search_context(self, result: dict[str, Any]) -> str:
         lines = []

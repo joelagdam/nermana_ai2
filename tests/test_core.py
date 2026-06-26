@@ -552,6 +552,89 @@ class AgentTests(unittest.TestCase):
             self.assertNotIn("larger voice engine stumbles", prompt_text)
             self.assertNotIn("GGUF model back online", prompt_text)
 
+    def test_agent_reports_capability_self_model_without_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            health = {"ok": True, "state": "chat ready", "server_context_size": 4096, "configured_context_size": 4096}
+            with patch.object(agent.models, "runtime_status", return_value=health), patch.object(agent.models, "chat", side_effect=AssertionError("LLM should not run")):
+                result = agent.chat("/tools", session_id="capabilities")
+            self.assertTrue(result["core_answer"])
+            self.assertIn("Operational awareness", result["reply"])
+            self.assertIn("human consciousness", result["reply"])
+            self.assertIn("Active tools", result["reply"])
+            self.assertIn("current_weather", result["reply"])
+            self.assertIn("Decision policy", result["reply"])
+
+    def test_agent_reports_unavailable_focused_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            health = {"ok": True, "state": "chat ready"}
+            with patch.object(agent.models, "runtime_status", return_value=health), patch.object(agent.models, "chat", side_effect=AssertionError("LLM should not run")):
+                result = agent.chat("can you generate image and use vision?", session_id="capability-focus")
+            self.assertIn("generate_image", result["reply"])
+            self.assertIn("vision_analyze", result["reply"])
+            self.assertIn("Unavailable now", result["reply"])
+            self.assertNotIn("current_weather", result["reply"])
+
+    def test_agent_reports_phone_tool_awareness_without_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            health = {"ok": True, "state": "chat ready"}
+            with patch.object(agent.models, "runtime_status", return_value=health), patch.object(agent.models, "chat", side_effect=AssertionError("LLM should not run")):
+                result = agent.chat("are you aware of your phone and shizuku tools?", session_id="phone-awareness")
+            self.assertTrue(result["core_answer"])
+            self.assertIn("phone_status", result["reply"])
+            self.assertIn("shizuku", result["reply"].lower())
+            self.assertIn("Decision policy", result["reply"])
+
+    def test_agent_reports_consciousness_as_operational_self_model_without_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            health = {"ok": True, "state": "chat ready"}
+            with patch.object(agent.models, "runtime_status", return_value=health), patch.object(agent.models, "chat", side_effect=AssertionError("LLM should not run")):
+                result = agent.chat("are you conscious?", session_id="consciousness")
+            self.assertTrue(result["core_answer"])
+            self.assertIn("do not have human consciousness", result["reply"])
+            self.assertIn("live capability self-model", result["reply"])
+            self.assertIn("Decision policy", result["reply"])
+
+    def test_agent_capability_phrasings_use_core_accuracy_path(self) -> None:
+        prompts = [
+            "what can you do?",
+            "which capabilities are active?",
+            "what tools are unavailable?",
+            "provider status",
+            "can you control my phone?",
+            "do you have access to shizuku?",
+            "can you use vision tools?",
+            "do you know yourself?",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            health = {"ok": True, "state": "chat ready"}
+            with patch.object(agent.models, "runtime_status", return_value=health), patch.object(agent.models, "chat", side_effect=AssertionError("LLM should not run")):
+                for prompt in prompts:
+                    with self.subTest(prompt=prompt):
+                        result = agent.chat(prompt, session_id="capability-phrasing")
+                        self.assertTrue(result["core_answer"])
+                        self.assertIn("Operational awareness", result["reply"])
+                        self.assertIn("Decision policy", result["reply"])
+
+    def test_capability_context_includes_decision_policy_and_unavailable_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            context = agent._capability_context()
+            self.assertIn("decision_policy", context)
+            self.assertIn("active_tool_count", context)
+            self.assertIn("Unavailable tools", context)
+            self.assertIn("generate_image", context)
+
     def test_agent_runs_safe_semi_auto_tool_without_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
