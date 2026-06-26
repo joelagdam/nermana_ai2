@@ -428,6 +428,20 @@ class ToolTests(unittest.TestCase):
             self.assertTrue(registry.run("read_file", {"path": str(inside)})["ok"])
             self.assertFalse(registry.run("read_file", {"path": str(outside)})["ok"])
 
+    def test_file_reader_redacts_json_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file = root / "config.json"
+            config_file.write_text('{"telegram": {"token": "secret-token"}, "model": {"active_model": "ok.gguf"}}', encoding="utf-8")
+            cfg = AppConfig(files=FileConfig(allowed_dirs=[str(root)]), memory=MemoryConfig(db_path=str(root / "m.sqlite3")))
+            registry = ToolRegistry(cfg)
+            memory = MemoryStore(cfg.memory)
+            register_file_tools(registry, cfg, memory)
+            result = registry.run("read_file", {"path": str(config_file)})
+            self.assertTrue(result["ok"])
+            self.assertIn('"token": "***"', result["content"])
+            self.assertNotIn("secret-token", result["content"])
+
 
 class AgentTests(unittest.TestCase):
     def test_agent_direct_tool_fallback(self) -> None:

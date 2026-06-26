@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import mimetypes
+import json
+import re
 from pathlib import Path
 
 from nermana.config import AppConfig, resolve_path
@@ -42,6 +44,7 @@ def register_file_tools(registry: ToolRegistry, config: AppConfig, memory: Memor
             text = _read_pdf(path)
         else:
             text = path.read_text(encoding="utf-8", errors="replace")
+        text = _redact_secrets(text, path)
         return {"ok": True, "path": str(path), "content_type": content_type, "content": text}
 
     def index_file(payload: dict) -> dict:
@@ -106,3 +109,36 @@ def _read_pdf(path: Path) -> str:
         raise RuntimeError("PDF reading needs the optional pypdf package") from exc
     reader = PdfReader(str(path))
     return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+SENSITIVE_KEY_RE = re.compile(r"(token|api[_-]?key|secret|password|authorization|credential)", re.I)
+SENSITIVE_LINE_RE = re.compile(r"(?im)^([A-Z0-9_]*(?:TOKEN|API_KEY|SECRET|PASSWORD|AUTHORIZATION|CREDENTIAL)[A-Z0-9_]*\s*=\s*).+$")
+
+
+def _redact_secrets(text: str, path: Path) -> str:
+    if path.suffix.lower() == ".json":
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return _redact_secret_lines(text)
+        redacted = _redact_json_value(data)
+        return json.dumps(redacted, indent=2, sort_keys=True)
+    return _redact_secret_lines(text)
+
+
+def _redact_json_value(value):
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if SENSITIVE_KEY_RE.search(str(key)):
+                result[key] = "***" if item not in {"", None} else item
+            else:
+                result[key] = _redact_json_value(item)
+        return result
+    if isinstance(value, list):
+        return [_redact_json_value(item) for item in value]
+    return value
+
+
+def _redact_secret_lines(text: str) -> str:
+    return SENSITIVE_LINE_RE.sub(r"\1***", text)
