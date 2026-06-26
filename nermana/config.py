@@ -225,6 +225,29 @@ def public_config(config: AppConfig) -> dict[str, Any]:
     return data
 
 
+def default_public_config() -> dict[str, Any]:
+    return public_config(sanitize_for_runtime(AppConfig()))
+
+
+def reset_config_defaults(
+    current: AppConfig,
+    preserve_secrets: bool = True,
+    preserve_model_selection: bool = True,
+) -> AppConfig:
+    new_config = AppConfig()
+    if preserve_model_selection:
+        new_config.model.active_model = current.model.active_model
+        new_config.model.fallback_model = current.model.fallback_model
+        new_config.model.models_dir = current.model.models_dir
+    if preserve_secrets:
+        new_config.telegram.token = current.telegram.token
+        new_config.telegram.allowed_user_ids = list(current.telegram.allowed_user_ids)
+        new_config.telegram.enabled = current.telegram.enabled
+        new_config.providers.image_api_key = current.providers.image_api_key
+        new_config.providers.vision_api_key = current.providers.vision_api_key
+    return sanitize_for_runtime(new_config)
+
+
 def _deep_update(base: dict[str, Any], patch: dict[str, Any]) -> None:
     for key, value in patch.items():
         if isinstance(value, dict) and isinstance(base.get(key), dict):

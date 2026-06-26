@@ -1218,6 +1218,27 @@ document.getElementById("updateButton").addEventListener("click", async () => {
   renderResult("updateOutput", result);
 });
 
+document.getElementById("showDefaultsButton").addEventListener("click", async () => {
+  const result = await runAction("Defaults", () => api("/api/settings/defaults"), "Defaults loaded");
+  renderResult("settingsOutput", result.defaults || result);
+});
+
+document.getElementById("resetDefaultsButton").addEventListener("click", async () => {
+  const ok = window.confirm("Restore default settings? This keeps the selected model and saved tokens, but resets runtime, providers, tools, memory behavior, and UI settings.");
+  if (!ok) return;
+  const result = await runAction(
+    "Defaults",
+    () =>
+      api("/api/settings/reset", {
+        method: "POST",
+        body: JSON.stringify({ preserve_secrets: true, preserve_model_selection: true }),
+      }),
+    "Defaults restored"
+  );
+  renderResult("settingsOutput", result);
+  await refreshAll();
+});
+
 refreshAll().catch((error) => {
   statusLine.textContent = String(error.message || error);
   showToast("Startup", String(error.message || error), "error");

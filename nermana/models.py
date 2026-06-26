@@ -27,6 +27,8 @@ class ModelManager:
         self.config = config
         self.persist = persist
         self._process: subprocess.Popen | None = None
+        self._runtime_cache: dict[str, Any] | None = None
+        self._runtime_cache_at = 0.0
 
     @property
     def models_dir(self) -> Path:
@@ -165,9 +167,12 @@ class ModelManager:
             }
         return {"ok": False, "endpoint_ok": False, "ready": False, "base_url": self.config.model.base_url, "error": response.error, "state": "offline"}
 
-    def runtime_status(self) -> dict[str, Any]:
+    def runtime_status(self, force: bool = False, max_age_seconds: float = 8.0) -> dict[str, Any]:
+        if not force and self._runtime_cache and time.time() - self._runtime_cache_at < max_age_seconds:
+            return dict(self._runtime_cache)
         health = self.server_health()
         if not health.get("endpoint_ok"):
+            self._cache_runtime(health)
             return health
         chat = self.chat(
             [
@@ -182,7 +187,12 @@ class ModelManager:
         health["ok"] = bool(chat.get("ok"))
         health["chat_check"] = {"ok": bool(chat.get("ok")), "error": chat.get("error", ""), "model": chat.get("model")}
         health["state"] = "chat ready" if chat.get("ok") else "endpoint reachable, chat failed"
+        self._cache_runtime(health)
         return health
+
+    def _cache_runtime(self, health: dict[str, Any]) -> None:
+        self._runtime_cache = dict(health)
+        self._runtime_cache_at = time.time()
 
     def chat(
         self,
@@ -260,7 +270,7 @@ class ModelManager:
                 self._save()
             return {"ok": False, "error": str(exc), "command": command, "killed_external": killed}
         time.sleep(1)
-        health = self.runtime_status()
+        health = self.runtime_status(force=True)
         health["started_process"] = self._process.pid if self._process else None
         health["command"] = command
         health["killed_external"] = killed
@@ -311,6 +321,7 @@ class ModelManager:
             except subprocess.TimeoutExpired:
                 self._process.kill()
         self._process = None
+        self._runtime_cache = None
 
     def stop_external_server(self, port: int | None = None) -> list[int]:
         port = port or self._port_from_base_url()

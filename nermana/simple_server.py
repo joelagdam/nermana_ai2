@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .agent import AgentCore
 from .capabilities import collect_capabilities
-from .config import merge_config, save_config
+from .config import default_public_config, merge_config, reset_config_defaults, save_config
 from .model_downloads import download_model, download_preset, list_presets
 from .telegram_bot import TelegramBot
 from .tools.files import _safe_path
@@ -264,6 +264,8 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._json(self.agent.initiative_message(query.get("session_id", ["web"])[0]))
         elif path == "/api/settings":
             self._json(self.agent.settings_snapshot())
+        elif path == "/api/settings/defaults":
+            self._json({"ok": True, "defaults": default_public_config()})
         elif path == "/api/models":
             self._json(
                 {
@@ -273,7 +275,7 @@ class NermanaHandler(BaseHTTPRequestHandler):
                 }
             )
         elif path == "/api/models/health":
-            self._json(self.agent.models.runtime_status())
+            self._json(self.agent.models.runtime_status(force=True))
         elif path == "/api/models/presets":
             self._json({"presets": list_presets()})
         elif path.startswith("/api/models/downloads/"):
@@ -333,6 +335,15 @@ class NermanaHandler(BaseHTTPRequestHandler):
             save_config(new_config)
             self.agent.reload(new_config)
             self._json(self.agent.settings_snapshot())
+        elif path == "/api/settings/reset":
+            new_config = reset_config_defaults(
+                self.agent.config,
+                preserve_secrets=bool(body.get("preserve_secrets", True)),
+                preserve_model_selection=bool(body.get("preserve_model_selection", True)),
+            )
+            save_config(new_config)
+            self.agent.reload(new_config)
+            self._json({"ok": True, "message": "Settings restored to defaults.", "config": self.agent.settings_snapshot()})
         elif path == "/api/models/select":
             result = self.agent.models.switch(str(body.get("model_name", "")))
             self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST)

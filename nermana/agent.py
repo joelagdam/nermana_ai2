@@ -80,23 +80,50 @@ class AgentCore:
             tool_results,
             model_ok=bool(model_reply.get("ok")),
             model_error=model_reply.get("error", ""),
+            compacted_prompt=bool(model_reply.get("compacted_prompt")),
+            original_model_error=model_reply.get("original_error", ""),
         )
 
     def run_tool(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self.tools.run(name, payload)
 
     def _chat_model(self, messages: list[dict[str, str]]) -> dict[str, Any]:
-        first = self.models.chat(messages)
-        if first.get("ok") or not self.config.model.auto_start_server or not self.config.model.active_model:
+        first = self._try_model_chat(messages)
+        if first.get("ok"):
+            return first
+        compact = self._retry_compact_if_needed(messages, first)
+        if compact is not None:
+            return compact
+        if not self.config.model.auto_start_server or not self.config.model.active_model:
             return first
         restart = self.models.restart_server()
         if not restart.get("ok") and not restart.get("started_process"):
             first["restart"] = restart
             return first
-        second = self.models.chat(messages)
+        second = self._try_model_chat(messages)
         if not second.get("ok"):
             second["restart"] = restart
+            compact = self._retry_compact_if_needed(messages, second)
+            if compact is not None:
+                compact["restart"] = restart
+                return compact
         return second
+
+    def _try_model_chat(self, messages: list[dict[str, str]], available_context: int | None = None) -> dict[str, Any]:
+        return self.models.chat(messages, max_tokens=self._max_response_tokens(available_context))
+
+    def _retry_compact_if_needed(self, messages: list[dict[str, str]], result: dict[str, Any]) -> dict[str, Any] | None:
+        error = str(result.get("error", ""))
+        if not self._context_overflow(error):
+            return None
+        available_context = self._available_context_from_error(error)
+        compact_messages = self._compact_messages_from(messages, available_context)
+        retry = self._try_model_chat(compact_messages, available_context)
+        retry["compacted_prompt"] = True
+        retry["original_error"] = error
+        if not retry.get("ok") and result.get("retry_model"):
+            retry["retry_model"] = result.get("retry_model")
+        return retry
 
     def _answer_from_tool_context(self, session_id: str, instruction: str, tool_result: dict[str, Any]) -> str:
         tool_context = self._tool_result_to_text(tool_result)
@@ -117,6 +144,8 @@ class AgentCore:
         return result
 
     def _build_messages(self, session_id: str, message: str, memories: list, tool_context: str) -> list[dict[str, str]]:
+        if int(self.config.model.context_size or 0) <= 1024:
+            return self._build_compact_messages(message, tool_context)
         thinking = self._thinking_hint(message)
         system = (
             "You are Nermana, an offline-first cyberperson running on the user's phone in Termux. "
@@ -146,6 +175,17 @@ class AgentCore:
         messages.extend({"role": item["role"], "content": self._compact_text(item["content"], 900)} for item in history[:-1])
         messages.append({"role": "user", "content": f"{message} {thinking}".strip()})
         return messages
+
+    def _build_compact_messages(self, message: str, tool_context: str = "") -> list[dict[str, str]]:
+        system = (
+            "You are Nermana, a local-first cyberperson on the user's phone. "
+            "Never call yourself an AI assistant. Be direct, concise, and useful. "
+            "If tool facts are present, summarize them; do not dump JSON. "
+            "Ask before risky phone actions or memory saves."
+        )
+        if tool_context:
+            system += "\nTool facts:\n" + self._compact_text(tool_context, 700)
+        return [{"role": "system", "content": system}, {"role": "user", "content": self._compact_text(message, 700)}]
 
     def _thinking_hint(self, message: str) -> str:
         mode = self.config.model.thinking_mode
@@ -423,6 +463,40 @@ class AgentCore:
         if len(clean) <= limit:
             return clean
         return clean[: max(0, limit - 1)].rstrip() + "."
+
+    def _context_overflow(self, error: str) -> bool:
+        lower = error.lower()
+        return "exceeds the available context size" in lower or ("context size" in lower and "exceed" in lower)
+
+    def _available_context_from_error(self, error: str) -> int | None:
+        match = re.search(r"available context size\s*\((\d+)\s+tokens?\)", error, re.I)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    def _max_response_tokens(self, available_context: int | None = None) -> int:
+        context = int(available_context or self.config.model.context_size or 2048)
+        if context <= 512:
+            return 96
+        if context <= 1024:
+            return 160
+        if context <= 2048:
+            return 256
+        return 512
+
+    def _compact_messages_from(self, messages: list[dict[str, str]], available_context: int | None = None) -> list[dict[str, str]]:
+        user = next((item.get("content", "") for item in reversed(messages) if item.get("role") == "user"), "")
+        tool_context = ""
+        for item in messages:
+            content = item.get("content", "")
+            marker = "Tool context:"
+            if marker in content:
+                tool_context = content.split(marker, 1)[1]
+        limit = 480 if (available_context or self.config.model.context_size) <= 512 else 900
+        return self._build_compact_messages(self._compact_text(user, limit), self._compact_text(tool_context, limit))
 
     def _split_reply(self, answer: str, limit: int = 1500) -> list[str]:
         text = str(answer or "")

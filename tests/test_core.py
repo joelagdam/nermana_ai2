@@ -9,7 +9,7 @@ from pathlib import Path
 
 from nermana.agent import AgentCore
 from nermana.capabilities import Capability
-from nermana.config import AppConfig, FileConfig, MemoryConfig, ModelConfig, SafetyConfig, SearchConfig, TelegramConfig, merge_config, save_config
+from nermana.config import AppConfig, FileConfig, MemoryConfig, ModelConfig, SafetyConfig, SearchConfig, TelegramConfig, merge_config, reset_config_defaults, save_config
 from nermana.http_client import HttpResponse
 from nermana.model_downloads import download_model, list_presets
 from nermana.memory import MemoryStore
@@ -48,6 +48,17 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(updated.model.temperature, 0.25)
         self.assertFalse(updated.search.enabled)
         self.assertIsInstance(updated.model, ModelConfig)
+
+    def test_reset_config_defaults_preserves_model_and_secrets(self) -> None:
+        cfg = AppConfig(
+            model=ModelConfig(active_model="phone.gguf", context_size=512),
+            telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7]),
+        )
+        reset = reset_config_defaults(cfg)
+        self.assertEqual(reset.model.context_size, 4096)
+        self.assertEqual(reset.model.active_model, "phone.gguf")
+        self.assertEqual(reset.telegram.token, "token")
+        self.assertTrue(reset.telegram.enabled)
 
 
 class ModelTests(unittest.TestCase):
@@ -418,6 +429,28 @@ class AgentTests(unittest.TestCase):
                 result = agent.chat("tell me a long thing", session_id="long")
             self.assertGreater(len(result["reply_batches"]), 1)
             self.assertEqual(result["reply"], answer)
+
+    def test_agent_retries_with_compact_prompt_on_context_overflow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")), model=ModelConfig(context_size=4096))
+            agent = AgentCore(cfg)
+            bad = {
+                "ok": False,
+                "error": "HTTP Error 400: Bad Request: request (1092 tokens) exceeds the available context size (512 tokens), try increasing it",
+            }
+            good = {"ok": True, "content": "Compact path works."}
+            captured = []
+
+            def fake_chat(messages, max_tokens=512):
+                captured.append((messages, max_tokens))
+                return bad if len(captured) == 1 else good
+
+            with patch.object(agent.models, "chat", side_effect=fake_chat):
+                result = agent.chat("Arise", session_id="compact")
+            self.assertEqual(result["reply"], "Compact path works.")
+            self.assertTrue(result["compacted_prompt"])
+            self.assertEqual(captured[1][1], 96)
+            self.assertLess(len(str(captured[1][0])), len(str(captured[0][0])))
 
 
 class TelegramTests(unittest.TestCase):
