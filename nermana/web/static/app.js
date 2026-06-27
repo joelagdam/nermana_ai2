@@ -1411,15 +1411,64 @@ async function renderUpdateStatus(refreshRemote = false) {
 
 function renderUpdateStatusResult(result) {
   const node = document.getElementById("updateStatus");
+  node.innerHTML = "";
   if (!result.ok) {
-    node.textContent = result.error || result.message || "Update status unavailable.";
+    node.appendChild(activityItem("Update status", result.error || result.message || "Update status unavailable."));
+    const stepError = updateStepError(result.fetch || result.step);
+    if (stepError) node.appendChild(activityItem("Detail", stepError));
     return;
   }
-  const parts = [result.message || "Update status ready."];
-  if (result.branch) parts.push(`branch ${result.branch}`);
-  if (result.current) parts.push(`current ${result.current}`);
-  if (result.remote) parts.push(`upstream ${result.remote}`);
-  node.textContent = parts.join(" | ");
+  node.appendChild(activityItem("Update status", result.message || "Update status ready."));
+  if (result.branch || result.current || result.remote) {
+    node.appendChild(activityItem("Version", [`branch ${result.branch || "unknown"}`, `current ${result.current || "unknown"}`, `remote ${result.remote || "unknown"}`].join(" | ")));
+  }
+  if (result.upstream) {
+    const source = result.target?.source ? ` (${result.target.source})` : "";
+    node.appendChild(activityItem("Source", `${result.upstream}${source}`));
+  }
+  if (result.dirty) {
+    const count = result.dirty_files?.length || 0;
+    node.appendChild(activityItem("Local source changes", `${count} file(s) detected. Update will stash source changes before applying.`));
+  }
+  if (result.ahead) node.appendChild(activityItem("Local changes", "This checkout is ahead of the update source. Auto update will not rewrite it."));
+  if (result.diverged) node.appendChild(activityItem("Manual update needed", "Local and remote commits diverged. Auto update will not merge this safely."));
+}
+
+function renderUpdateOutput(result) {
+  const node = document.getElementById("updateOutput");
+  if (!node) return;
+  node.innerHTML = "";
+  if (!result || typeof result !== "object") {
+    node.appendChild(activityItem("Update", "No result returned."));
+    return;
+  }
+  node.appendChild(activityItem(result.ok === false ? "Update failed" : "Update", result.message || (result.ok === false ? "Action failed." : "Done.")));
+  if (result.before || result.after) {
+    node.appendChild(activityItem("Version", `before ${result.before || "unknown"} | after ${result.after || "unknown"}`));
+  }
+  if (result.target?.target) {
+    node.appendChild(activityItem("Source", `${result.target.target} (${result.target.source || "git"})`));
+  } else if (result.status?.upstream) {
+    node.appendChild(activityItem("Source", result.status.upstream));
+  }
+  if (result.stash) {
+    const detail = result.stash.ok ? result.stash.stdout || "Local source changes were stashed before update." : updateStepError(result.stash);
+    node.appendChild(activityItem("Source backup", detail));
+  } else if (result.dirty) {
+    node.appendChild(activityItem("Local source changes", "Detected before update."));
+  }
+  const fetchError = updateStepError(result.fetch);
+  if (fetchError) node.appendChild(activityItem("Fetch", fetchError));
+  const pullError = updateStepError(result.pull || result.step);
+  if (pullError) node.appendChild(activityItem("Apply", pullError));
+  if (result.config_path) node.appendChild(activityItem("Config preserved", result.config_path));
+  if (result.models_dir) node.appendChild(activityItem("Models preserved", result.models_dir));
+  if (result.status) renderUpdateStatusResult(result.status);
+}
+
+function updateStepError(step) {
+  if (!step || step.ok !== false) return "";
+  return step.stderr || step.error || step.message || "Git command failed.";
 }
 
 document.getElementById("settingsForm").addEventListener("submit", async (event) => {
@@ -1432,13 +1481,13 @@ document.getElementById("settingsForm").addEventListener("submit", async (event)
 document.getElementById("checkUpdateButton").addEventListener("click", async () => {
   const result = await runAction("Update check", () => renderUpdateStatus(true), "Check complete");
   renderUpdateStatusResult(result);
-  renderResult("updateOutput", result);
+  renderUpdateOutput(result);
 });
 
 document.getElementById("updateButton").addEventListener("click", async () => {
   const result = await runAction("Update", () => api("/api/update", { method: "POST", body: JSON.stringify({}) }), "Update finished");
   renderUpdateStatusResult(result.status || result);
-  renderResult("updateOutput", result);
+  renderUpdateOutput(result);
 });
 
 document.getElementById("showDefaultsButton").addEventListener("click", async () => {

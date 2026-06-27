@@ -22,6 +22,7 @@ from nermana.telegram_bot import TelegramBot
 from nermana.tooling import Tool, ToolRegistry
 from nermana.tools.files import register_file_tools
 from nermana.tools.search import register_search_tools
+from nermana.updater import update_status, update_system
 
 
 class FakeUrlResponse:
@@ -1200,6 +1201,112 @@ class DashboardTests(unittest.TestCase):
                 result = server.repair_model_server()
             self.assertTrue(result["ok"])
             self.assertTrue(result["waited"])
+
+
+class UpdaterTests(unittest.TestCase):
+    def test_update_status_falls_back_to_origin_main_without_upstream(self) -> None:
+        def fake_git(args):
+            command = tuple(args)
+            responses = {
+                ("rev-parse", "--short", "HEAD"): {"ok": True, "stdout": "aaa111"},
+                ("rev-parse", "--abbrev-ref", "HEAD"): {"ok": True, "stdout": "main"},
+                ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): {"ok": False, "stderr": "no upstream"},
+                ("rev-parse", "--verify", "origin/main"): {"ok": True, "stdout": "bbb222"},
+                ("rev-parse", "--short", "origin/main"): {"ok": True, "stdout": "bbb222"},
+                ("rev-parse", "HEAD"): {"ok": True, "stdout": "aaa111full"},
+                ("rev-parse", "origin/main"): {"ok": True, "stdout": "bbb222full"},
+                ("merge-base", "HEAD", "origin/main"): {"ok": True, "stdout": "aaa111full"},
+                ("status", "--porcelain"): {"ok": True, "stdout": ""},
+            }
+            return responses.get(command, {"ok": False, "stderr": f"unexpected {args}"})
+
+        with patch("nermana.updater._git", side_effect=fake_git):
+            result = update_status(fetch=False)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["update_available"])
+        self.assertEqual(result["upstream"], "origin/main")
+        self.assertEqual(result["target"]["source"], "origin fallback")
+
+    def test_update_system_merges_origin_fallback_without_upstream(self) -> None:
+        state = {"updated": False}
+
+        def fake_git(args):
+            command = tuple(args)
+            if command == ("rev-parse", "--short", "HEAD"):
+                return {"ok": True, "stdout": "bbb222" if state["updated"] else "aaa111"}
+            if command == ("fetch", "--all", "--prune"):
+                return {"ok": True, "stdout": "fetched"}
+            if command == ("status", "--porcelain"):
+                return {"ok": True, "stdout": ""}
+            if command == ("rev-parse", "--abbrev-ref", "HEAD"):
+                return {"ok": True, "stdout": "main"}
+            if command == ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"):
+                return {"ok": False, "stderr": "no upstream"}
+            if command == ("rev-parse", "--verify", "origin/main"):
+                return {"ok": True, "stdout": "bbb222full"}
+            if command == ("merge", "--ff-only", "origin/main"):
+                state["updated"] = True
+                return {"ok": True, "stdout": "Fast-forward"}
+            if command == ("rev-parse", "--short", "origin/main"):
+                return {"ok": True, "stdout": "bbb222"}
+            if command == ("rev-parse", "HEAD"):
+                return {"ok": True, "stdout": "bbb222full" if state["updated"] else "aaa111full"}
+            if command == ("rev-parse", "origin/main"):
+                return {"ok": True, "stdout": "bbb222full"}
+            if command == ("merge-base", "HEAD", "origin/main"):
+                return {"ok": True, "stdout": "bbb222full" if state["updated"] else "aaa111full"}
+            return {"ok": False, "stderr": f"unexpected {args}"}
+
+        with patch("nermana.updater._git", side_effect=fake_git), patch("nermana.updater._backup_config", return_value=None), patch(
+            "nermana.updater._restore_config_if_missing"
+        ), patch("nermana.updater._ensure_persistent_dirs"):
+            result = update_system()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["before"], "aaa111")
+        self.assertEqual(result["after"], "bbb222")
+        self.assertEqual(result["target"]["target"], "origin/main")
+        self.assertEqual(result["pull"]["stdout"], "Fast-forward")
+
+    def test_update_system_stashes_dirty_source_before_merge(self) -> None:
+        state = {"updated": False, "stashed": False}
+
+        def fake_git(args):
+            command = tuple(args)
+            if command == ("rev-parse", "--short", "HEAD"):
+                return {"ok": True, "stdout": "bbb222" if state["updated"] else "aaa111"}
+            if command == ("fetch", "--all", "--prune"):
+                return {"ok": True, "stdout": "fetched"}
+            if command == ("status", "--porcelain"):
+                return {"ok": True, "stdout": "" if state["stashed"] else " M nermana/agent.py\n?? nermana/core_knowledge.py"}
+            if command[:4] == ("stash", "push", "--include-untracked", "-m"):
+                state["stashed"] = True
+                return {"ok": True, "stdout": "Saved working directory and index state"}
+            if command == ("rev-parse", "--abbrev-ref", "HEAD"):
+                return {"ok": True, "stdout": "main"}
+            if command == ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"):
+                return {"ok": True, "stdout": "origin/main"}
+            if command == ("merge", "--ff-only", "origin/main"):
+                self.assertTrue(state["stashed"])
+                state["updated"] = True
+                return {"ok": True, "stdout": "Fast-forward"}
+            if command == ("rev-parse", "--short", "origin/main"):
+                return {"ok": True, "stdout": "bbb222"}
+            if command == ("rev-parse", "HEAD"):
+                return {"ok": True, "stdout": "bbb222full" if state["updated"] else "aaa111full"}
+            if command == ("rev-parse", "origin/main"):
+                return {"ok": True, "stdout": "bbb222full"}
+            if command == ("merge-base", "HEAD", "origin/main"):
+                return {"ok": True, "stdout": "bbb222full" if state["updated"] else "aaa111full"}
+            return {"ok": False, "stderr": f"unexpected {args}"}
+
+        with patch("nermana.updater._git", side_effect=fake_git), patch("nermana.updater._backup_config", return_value=None), patch(
+            "nermana.updater._restore_config_if_missing"
+        ), patch("nermana.updater._ensure_persistent_dirs"):
+            result = update_system()
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["dirty"])
+        self.assertTrue(result["stash"]["ok"])
+        self.assertEqual(result["after"], "bbb222")
 
 
 if __name__ == "__main__":

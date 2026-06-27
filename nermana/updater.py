@@ -14,31 +14,27 @@ def update_status(fetch: bool = False) -> dict[str, Any]:
         return {"ok": False, "error": "This folder is not a git checkout."}
     current = _git(["rev-parse", "--short", "HEAD"])
     branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
-    upstream = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
     if not current["ok"]:
         return current
-    if not upstream["ok"]:
-        return {
-            "ok": True,
-            "message": "No upstream branch is configured.",
-            "current": current.get("stdout", ""),
-            "branch": branch.get("stdout", ""),
-            "update_available": False,
-            "fetch": None,
-        }
 
     fetch_result = None
     if fetch:
         fetch_result = _git(["fetch", "--all", "--prune"])
         if not fetch_result["ok"]:
-            return _status_result(False, "Could not check remote updates.", current, branch, upstream, fetch_result)
+            return _status_result(False, "Could not check remote updates. Check internet or git credentials.", current, branch, {}, fetch_result)
+    dirty = _dirty_status()
 
-    remote = _git(["rev-parse", "--short", "@{u}"])
+    target = _update_target(branch)
+    if not target["ok"]:
+        return _status_result(False, target.get("error", "No update source configured."), current, branch, target, fetch_result)
+
+    target_ref = target["target"]
+    remote = _git(["rev-parse", "--short", target_ref])
     current_full = _git(["rev-parse", "HEAD"])
-    remote_full = _git(["rev-parse", "@{u}"])
-    base = _git(["merge-base", "HEAD", "@{u}"])
+    remote_full = _git(["rev-parse", target_ref])
+    base = _git(["merge-base", "HEAD", target_ref])
     if not (remote["ok"] and current_full["ok"] and remote_full["ok"] and base["ok"]):
-        return _status_result(False, "Could not compare local and upstream commits.", current, branch, upstream, fetch_result)
+        return _status_result(False, "Could not compare local and update source commits.", current, branch, target, fetch_result)
 
     local_sha = current_full.get("stdout", "")
     remote_sha = remote_full.get("stdout", "")
@@ -60,10 +56,13 @@ def update_status(fetch: bool = False) -> dict[str, Any]:
         "current": current.get("stdout", ""),
         "remote": remote.get("stdout", ""),
         "branch": branch.get("stdout", ""),
-        "upstream": upstream.get("stdout", ""),
+        "upstream": target_ref,
+        "target": target,
         "update_available": behind,
         "ahead": ahead,
         "diverged": diverged,
+        "dirty": dirty.get("dirty", False),
+        "dirty_files": dirty.get("files", []),
         "fetch": fetch_result,
     }
 
@@ -78,7 +77,17 @@ def update_system() -> dict[str, Any]:
     fetch = _git(["fetch", "--all", "--prune"])
     if not fetch["ok"]:
         return _result(False, "git fetch failed", before, fetch, backup)
-    pull = _git(["pull", "--ff-only"])
+    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+    target = _update_target(branch)
+    if not target["ok"]:
+        return _result(False, target.get("error", "No update source configured."), before, target, backup)
+    dirty = _dirty_status()
+    stash = None
+    if dirty.get("dirty"):
+        stash = _stash_worktree()
+        if not stash["ok"]:
+            return _result(False, "Could not protect local source changes before update.", before, stash, backup)
+    pull = _git(["merge", "--ff-only", target["target"]])
     _restore_config_if_missing(backup)
     _ensure_persistent_dirs()
     after = _git(["rev-parse", "--short", "HEAD"])
@@ -95,8 +104,57 @@ def update_system() -> dict[str, Any]:
         "config_path": str(DEFAULT_CONFIG_PATH),
         "fetch": fetch,
         "pull": pull,
+        "dirty": dirty.get("dirty", False),
+        "dirty_files": dirty.get("files", []),
+        "stash": stash,
+        "target": target,
         "status": status,
     }
+
+
+def _update_target(branch: dict[str, Any]) -> dict[str, Any]:
+    upstream = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    if upstream["ok"] and upstream.get("stdout"):
+        return {"ok": True, "target": upstream["stdout"], "source": "upstream"}
+
+    branch_name = branch.get("stdout", "") if branch.get("ok") else ""
+    candidates = []
+    if branch_name and branch_name != "HEAD":
+        candidates.append(f"origin/{branch_name}")
+    candidates.extend(["origin/main", "origin/master"])
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        check = _git(["rev-parse", "--verify", candidate])
+        if check["ok"]:
+            return {
+                "ok": True,
+                "target": candidate,
+                "source": "origin fallback",
+                "note": "No upstream branch is configured; using the origin fallback.",
+                "upstream_error": upstream.get("stderr") or upstream.get("error", ""),
+            }
+    return {
+        "ok": False,
+        "error": "No update source configured. Set an upstream branch or add origin/main.",
+        "source": "none",
+        "upstream_error": upstream.get("stderr") or upstream.get("error", ""),
+    }
+
+
+def _dirty_status() -> dict[str, Any]:
+    status = _git(["status", "--porcelain"])
+    if not status["ok"]:
+        return {"ok": False, "dirty": False, "files": [], "error": status.get("stderr") or status.get("error", "")}
+    files = [line.strip() for line in status.get("stdout", "").splitlines() if line.strip()]
+    return {"ok": True, "dirty": bool(files), "files": files[:40], "count": len(files)}
+
+
+def _stash_worktree() -> dict[str, Any]:
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return _git(["stash", "push", "--include-untracked", "-m", f"nermana-auto-update-{stamp}"])
 
 
 def _git(args: list[str]) -> dict[str, Any]:
