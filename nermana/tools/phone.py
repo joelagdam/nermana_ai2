@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
 import subprocess
 
@@ -12,6 +13,7 @@ from nermana.tooling import Tool, ToolRegistry
 PACKAGE_RE = re.compile(r"^[A-Za-z0-9_.]+$")
 PERMISSION_RE = re.compile(r"^[A-Z_a-z0-9.]+$")
 SETTING_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+SHELL_META_RE = re.compile(r"[;&|<>`$()]")
 
 
 def register_phone_tools(registry: ToolRegistry, config: AppConfig) -> None:
@@ -98,6 +100,33 @@ def register_phone_tools(registry: ToolRegistry, config: AppConfig) -> None:
             return {"ok": False, "error": "invalid key or value"}
         return _privileged(config, f"settings put {namespace} {key} {value}")
 
+    def termux_command_available() -> tuple[bool, str]:
+        if not config.phone.enabled or not config.phone.termux_enabled:
+            return False, "Termux command tool disabled"
+        allowed = [name for name in config.phone.allowed_termux_commands if shutil.which(name)]
+        if allowed:
+            return True, f"allowed commands available: {', '.join(allowed[:8])}"
+        return False, "no configured Termux commands found in PATH"
+
+    def termux_command(payload: dict) -> dict:
+        command = str(payload.get("command", "")).strip()
+        if not command:
+            return {"ok": False, "error": "command is required"}
+        if len(command) > 500:
+            return {"ok": False, "error": "command is too long"}
+        if "\n" in command or SHELL_META_RE.search(command):
+            return {"ok": False, "error": "shell metacharacters are not allowed; pass one direct command only"}
+        try:
+            parts = shlex.split(command)
+        except ValueError as exc:
+            return {"ok": False, "error": f"invalid command: {exc}"}
+        if not parts:
+            return {"ok": False, "error": "command is required"}
+        executable = parts[0].rsplit("/", 1)[-1]
+        if executable not in set(config.phone.allowed_termux_commands):
+            return {"ok": False, "error": f"{executable} is not in allowed_termux_commands"}
+        return _run(parts, config.phone.command_timeout_seconds)
+
     registry.register(
         Tool(
             name="phone_status",
@@ -120,6 +149,19 @@ def register_phone_tools(registry: ToolRegistry, config: AppConfig) -> None:
             risk="safe",
             handler=open_url,
             availability=termux_available,
+        )
+    )
+    registry.register(
+        Tool(
+            name="termux_command",
+            description="Run one allowlisted Termux command without shell expansion.",
+            provider="termux",
+            input_schema={"type": "object", "properties": {"command": {"type": "string"}}},
+            offline_required=True,
+            risk="power",
+            timeout_seconds=config.phone.command_timeout_seconds,
+            handler=termux_command,
+            availability=termux_command_available,
         )
     )
     for name, description, handler in [

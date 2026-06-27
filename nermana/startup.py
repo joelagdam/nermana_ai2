@@ -36,6 +36,7 @@ class StartupManager:
         self._start_model_if_available()
         self._start_memory_if_available()
         self._start_telegram_if_available()
+        self._start_self_learning_if_available()
         self._serve_web()
 
     def _select_first_model_if_needed(self) -> None:
@@ -96,6 +97,16 @@ class StartupManager:
                     print(f"memory: consolidated {len(result.get('source_ids', []))} memories")
             except Exception as exc:
                 print(f"memory: consolidation error: {exc}")
+
+    def _start_self_learning_if_available(self) -> None:
+        if not self.agent.config.self_learning.enabled:
+            print("self-learning: disabled")
+            return
+        result = self.web_server.start_self_learning()
+        if result.get("ok"):
+            print("self-learning: always-on diagnostics")
+        else:
+            print(f"self-learning: {result.get('error', 'not started')}")
 
     def _serve_web(self) -> None:
         host = self.web_host

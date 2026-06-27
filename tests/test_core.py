@@ -9,7 +9,7 @@ from pathlib import Path
 
 from nermana.agent import AgentCore
 from nermana.capabilities import Capability
-from nermana.config import AppConfig, FileConfig, MemoryConfig, ModelConfig, SafetyConfig, SearchConfig, TelegramConfig, merge_config, reset_config_defaults, save_config
+from nermana.config import AppConfig, FileConfig, MemoryConfig, ModelConfig, SafetyConfig, SearchConfig, SelfLearningConfig, TelegramConfig, merge_config, reset_config_defaults, save_config
 from nermana.core_knowledge import knowledge_status, search_core_knowledge
 from nermana.http_client import HttpResponse
 from nermana.model_downloads import delete_partial_download, download_model, list_partial_downloads, list_presets
@@ -21,6 +21,7 @@ from nermana.startup import StartupManager
 from nermana.telegram_bot import TelegramBot
 from nermana.tooling import Tool, ToolRegistry
 from nermana.tools.files import register_file_tools
+from nermana.tools.phone import register_phone_tools
 from nermana.tools.search import register_search_tools
 from nermana.updater import update_status, update_system
 
@@ -41,6 +42,13 @@ class FakeUrlResponse:
         if not self.chunks:
             return b""
         return self.chunks.pop(0)
+
+
+class FakeCompleted:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 class ConfigTests(unittest.TestCase):
@@ -360,6 +368,27 @@ class ToolTests(unittest.TestCase):
         result = registry.run("web_search", {"query": "hello"})
         self.assertFalse(result["ok"])
         self.assertIn("unavailable", result["error"])
+
+    def test_termux_command_runs_allowlisted_direct_command(self) -> None:
+        cfg = AppConfig()
+        registry = ToolRegistry(cfg)
+        register_phone_tools(registry, cfg)
+        with patch("nermana.tools.phone.shutil.which", return_value="/data/data/com.termux/files/usr/bin/date"), patch(
+            "nermana.tools.phone.subprocess.run", return_value=FakeCompleted(stdout="Sat Jun 27")
+        ) as run:
+            result = registry.run("termux_command", {"command": "date"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stdout"], "Sat Jun 27")
+        run.assert_called_once()
+
+    def test_termux_command_rejects_shell_metacharacters(self) -> None:
+        cfg = AppConfig()
+        registry = ToolRegistry(cfg)
+        register_phone_tools(registry, cfg)
+        with patch("nermana.tools.phone.shutil.which", return_value="/bin/date"):
+            result = registry.run("termux_command", {"command": "date; rm -rf data"})
+        self.assertFalse(result["ok"])
+        self.assertIn("metacharacters", result["error"])
 
     def test_duckduckgo_search_provider_parses_results(self) -> None:
         html = b"""
@@ -1201,6 +1230,36 @@ class DashboardTests(unittest.TestCase):
                 result = server.repair_model_server()
             self.assertTrue(result["ok"])
             self.assertTrue(result["waited"])
+
+    def test_self_learning_cycle_logs_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+                self_learning=SelfLearningConfig(auto_repair=False, log_path=str(Path(tmp) / "self.log")),
+            )
+            server = SimpleNermanaServer(AgentCore(cfg))
+            with patch.object(server, "doctor_snapshot", return_value={"ok": True, "summary": "No blocking issues detected.", "issues": []}):
+                result = server.run_self_learning_cycle()
+            self.assertTrue(result["ok"])
+            status = server.self_learning_status()
+            self.assertEqual(status["worker"]["cycles"], 1)
+            self.assertTrue(any("diagnosis" in line for line in status["log"]["lines"]))
+
+    def test_self_learning_cycle_runs_auto_repair_for_serious_issues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+                self_learning=SelfLearningConfig(auto_repair=True, repair_cooldown_seconds=30, log_path=str(Path(tmp) / "self.log")),
+            )
+            server = SimpleNermanaServer(AgentCore(cfg))
+            diagnostics = {"ok": True, "summary": "1 issue(s) detected.", "issues": [{"severity": "error", "title": "Model server is offline"}]}
+            with patch.object(server, "doctor_snapshot", return_value=diagnostics), patch.object(
+                server, "repair", return_value={"ok": True, "summary": "Repair finished.", "steps": [{"name": "model", "ok": True}]}
+            ) as repair:
+                result = server.run_self_learning_cycle()
+            self.assertTrue(result["ok"])
+            repair.assert_called_once_with("auto")
+            self.assertEqual(server.self_learning_status()["worker"]["repairs"], 1)
 
 
 class UpdaterTests(unittest.TestCase):

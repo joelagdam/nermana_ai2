@@ -17,6 +17,7 @@ from .agent import AgentCore
 from .capabilities import collect_capabilities
 from .config import default_public_config, merge_config, reset_config_defaults, save_config
 from .model_downloads import delete_partial_download, download_model, download_preset, list_partial_downloads, list_presets
+from .self_learning import append_self_learning_log, tail_self_learning_log
 from .telegram_bot import TelegramBot
 from .tools.files import _safe_path
 from .updater import update_status, update_system
@@ -41,6 +42,20 @@ class SimpleNermanaServer:
             "last_error": "",
             "processed": 0,
             "offset": 0,
+        }
+        self.self_learning_thread: threading.Thread | None = None
+        self.self_learning_stop = threading.Event()
+        self.self_learning_lock = threading.Lock()
+        self.self_learning_state: dict = {
+            "ok": True,
+            "running": False,
+            "started_at": 0,
+            "last_cycle_at": 0,
+            "last_repair_at": 0,
+            "last_error": "",
+            "cycles": 0,
+            "repairs": 0,
+            "last_summary": "",
         }
 
     def serve(self, host: str, port: int) -> None:
@@ -187,6 +202,7 @@ class SimpleNermanaServer:
             "capabilities": capabilities,
             "workers": workers,
             "telegram": self.telegram_worker_status(),
+            "self_learning": self.self_learning_status(include_log=False),
             "stats": {
                 "workers_total": len(workers),
                 "workers_working": working_count,
@@ -204,6 +220,7 @@ class SimpleNermanaServer:
                 "weather_city": self.agent.config.weather.location_name,
                 "allowed_folders": len(self.agent.config.files.allowed_dirs),
                 "telegram_users": len(self.agent.config.telegram.allowed_user_ids),
+                "self_learning_cycles": int(self.self_learning_state.get("cycles", 0) or 0),
             },
             "recent_sessions": sessions[:6],
             "recent_memories": recent_memories,
@@ -442,6 +459,21 @@ class SimpleNermanaServer:
             telegram_state = "disabled"
             telegram_details = "disabled or missing token"
         workers.append({"name": "Telegram", "state": telegram_state, "details": telegram_details})
+        learning = self.self_learning_status(include_log=False)
+        learning_worker = learning.get("worker", {})
+        if not learning.get("enabled"):
+            learning_state = "disabled"
+            learning_details = "disabled"
+        elif learning_worker.get("running") or learning_worker.get("thread_alive"):
+            learning_state = "working"
+            learning_details = learning_worker.get("last_summary") or f"{learning_worker.get('cycles', 0)} cycle(s)"
+        elif learning_worker.get("last_error"):
+            learning_state = "offline"
+            learning_details = learning_worker.get("last_error")
+        else:
+            learning_state = "ready"
+            learning_details = "ready to run diagnostics"
+        workers.append({"name": "Self learning", "state": learning_state, "details": learning_details})
         for job in active_downloads[:2]:
             workers.append(
                 {
@@ -486,6 +518,96 @@ class SimpleNermanaServer:
 
     def stop_workers(self) -> None:
         self.telegram_stop.set()
+        self.self_learning_stop.set()
+
+    def start_self_learning(self) -> dict:
+        cfg = self.agent.config.self_learning
+        if not cfg.enabled:
+            self._set_self_learning_state(ok=True, running=False, last_error="Self learning is disabled.")
+            return {"ok": False, "error": "Self learning is disabled."}
+        if self.self_learning_thread and self.self_learning_thread.is_alive():
+            return {"ok": True, "message": "Self learning already running.", "worker": self.self_learning_status()}
+        self.self_learning_stop.clear()
+        self._set_self_learning_state(ok=True, running=True, started_at=time.time(), last_error="")
+        append_self_learning_log(self.agent.config, "worker", "self learning started")
+        self.self_learning_thread = threading.Thread(target=self._self_learning_loop, name="nermana-self-learning", daemon=True)
+        self.self_learning_thread.start()
+        return {"ok": True, "message": "Self learning started.", "worker": self.self_learning_status()}
+
+    def stop_self_learning(self) -> dict:
+        self.self_learning_stop.set()
+        self._set_self_learning_state(running=False)
+        append_self_learning_log(self.agent.config, "worker", "self learning stopped")
+        return {"ok": True, "message": "Self learning stop requested.", "worker": self.self_learning_status()}
+
+    def self_learning_status(self, include_log: bool = True, lines: int | None = None) -> dict:
+        with self.self_learning_lock:
+            state = dict(self.self_learning_state)
+        state["thread_alive"] = bool(self.self_learning_thread and self.self_learning_thread.is_alive())
+        if not state["thread_alive"] and state.get("running"):
+            state["running"] = False
+            state["ok"] = False
+            state["last_error"] = state.get("last_error") or "Self learning worker stopped."
+        result = {"ok": True, "enabled": self.agent.config.self_learning.enabled, "auto_repair": self.agent.config.self_learning.auto_repair, "worker": state}
+        if include_log:
+            result["log"] = tail_self_learning_log(self.agent.config, lines)
+        return result
+
+    def run_self_learning_cycle(self, auto_repair: bool | None = None) -> dict:
+        cfg = self.agent.config.self_learning
+        repair_enabled = cfg.auto_repair if auto_repair is None else bool(auto_repair)
+        started = time.time()
+        try:
+            diagnostics = self.doctor_snapshot(force=True)
+            issues = diagnostics.get("issues", [])
+            serious = [issue for issue in issues if issue.get("severity") in {"warn", "error"}]
+            message = diagnostics.get("summary") or f"{len(issues)} issue(s) detected."
+            append_self_learning_log(
+                self.agent.config,
+                "diagnosis",
+                message,
+                {"issues": [issue.get("title", "issue") for issue in issues[:8]], "serious": len(serious)},
+            )
+            repair = None
+            cooldown = max(30.0, float(cfg.repair_cooldown_seconds or 600))
+            with self.self_learning_lock:
+                last_repair_at = float(self.self_learning_state.get("last_repair_at") or 0)
+            if serious and repair_enabled and time.time() - last_repair_at >= cooldown:
+                append_self_learning_log(self.agent.config, "repair", "auto repair started", {"serious": len(serious)})
+                repair = self.repair("auto")
+                append_self_learning_log(
+                    self.agent.config,
+                    "repair",
+                    repair.get("summary", "auto repair finished"),
+                    {"ok": bool(repair.get("ok")), "steps": [step.get("name") for step in repair.get("steps", [])]},
+                )
+                self._set_self_learning_state(last_repair_at=time.time(), repairs=int(self.self_learning_state.get("repairs", 0) or 0) + 1)
+            elif serious and repair_enabled:
+                append_self_learning_log(self.agent.config, "repair", "auto repair skipped by cooldown", {"serious": len(serious)})
+            duration_ms = int((time.time() - started) * 1000)
+            self._set_self_learning_state(
+                ok=True,
+                running=bool(self.self_learning_thread and self.self_learning_thread.is_alive()),
+                last_cycle_at=time.time(),
+                last_error="",
+                cycles=int(self.self_learning_state.get("cycles", 0) or 0) + 1,
+                last_summary=message,
+            )
+            return {"ok": True, "duration_ms": duration_ms, "diagnostics": diagnostics, "repair": repair, "log": tail_self_learning_log(self.agent.config)}
+        except Exception as exc:
+            append_self_learning_log(self.agent.config, "error", str(exc))
+            self._set_self_learning_state(ok=False, last_cycle_at=time.time(), last_error=str(exc))
+            return {"ok": False, "error": str(exc), "log": tail_self_learning_log(self.agent.config)}
+
+    def _self_learning_loop(self) -> None:
+        interval = max(60.0, float(self.agent.config.self_learning.interval_seconds or 300))
+        try:
+            while not self.self_learning_stop.is_set():
+                self.run_self_learning_cycle()
+                self.self_learning_stop.wait(interval)
+        finally:
+            self._set_self_learning_state(running=False)
+            append_self_learning_log(self.agent.config, "worker", "self learning stopped")
 
     def _telegram_loop(self, bot: TelegramBot) -> None:
         interval = max(1.0, float(self.agent.config.telegram.poll_interval_seconds))
@@ -511,6 +633,10 @@ class SimpleNermanaServer:
     def _set_telegram_state(self, **updates) -> None:
         with self.telegram_lock:
             self.telegram_state.update(updates)
+
+    def _set_self_learning_state(self, **updates) -> None:
+        with self.self_learning_lock:
+            self.self_learning_state.update(updates)
 
 
 class NermanaHandler(BaseHTTPRequestHandler):
@@ -583,9 +709,12 @@ class NermanaHandler(BaseHTTPRequestHandler):
                     "model_health": self.agent.models.runtime_status(),
                     "llama_log": self.agent.models.server_log_tail(80),
                     "telegram": self.server_state.telegram_worker_status(),
+                    "self_learning": self.server_state.self_learning_status(include_log=True, lines=50),
                     "tools": self.agent.tools.list_metadata(),
                 }
             )
+        elif path == "/api/self-learning":
+            self._json(self.server_state.self_learning_status(include_log=True, lines=_query_int(query, "lines", 50, 1, 500)))
         elif path == "/api/update/status":
             refresh = query.get("refresh", ["0"])[0].lower() in {"1", "true", "yes"}
             self._json(update_status(fetch=refresh))
@@ -671,6 +800,12 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._json(result)
         elif path == "/api/doctor/repair":
             self._json(self.server_state.repair(str(body.get("action", "auto"))))
+        elif path == "/api/self-learning/run":
+            self._json(self.server_state.run_self_learning_cycle(auto_repair=body.get("auto_repair")))
+        elif path == "/api/self-learning/start":
+            self._json(self.server_state.start_self_learning())
+        elif path == "/api/self-learning/stop":
+            self._json(self.server_state.stop_self_learning())
         elif path == "/api/files/upload":
             self._json(self._upload_file(body))
         elif path.startswith("/api/tools/") and path.endswith("/enabled"):

@@ -228,6 +228,7 @@ async function refreshAll() {
   await renderTools();
   await renderMemory();
   await renderLogs();
+  await renderSelfLearning();
   await renderUpdateStatus(false);
   await maybeInitiateChat();
 }
@@ -298,7 +299,9 @@ function fillForms() {
   setDottedForm("toolDecisionSettings", config);
   setDottedForm("phoneSettings", config);
   setDottedForm("telegramSettings", config);
+  setDottedForm("selfLearningSettings", config);
   setDottedForm("settingsForm", config);
+  document.querySelector("#phoneSettings [name='phone.allowed_termux_commands']").value = (config.phone.allowed_termux_commands || []).join("\n");
   document.querySelector("#telegramSettings [name='telegram.allowed_user_ids']").value = (config.telegram.allowed_user_ids || []).join(",");
   renderSettingsCards();
 }
@@ -1301,7 +1304,12 @@ document.getElementById("searchTest").addEventListener("submit", async (event) =
 });
 document.getElementById("phoneSettings").addEventListener("submit", async (event) => {
   event.preventDefault();
-  await runAction("Phone settings", () => savePatch(patchFromDottedForm("phoneSettings")));
+  const patch = patchFromDottedForm("phoneSettings");
+  patch.phone.allowed_termux_commands = String(document.querySelector("#phoneSettings [name='phone.allowed_termux_commands']").value)
+    .split(/\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  await runAction("Phone settings", () => savePatch(patch));
 });
 document.querySelectorAll("[data-phone-tool]").forEach((item) => {
   item.addEventListener("click", async () => {
@@ -1318,6 +1326,7 @@ document.getElementById("phoneAction").addEventListener("submit", async (event) 
     namespace: form.namespace.value,
     key: form.key.value,
     value: form.value.value,
+    command: form.command.value,
     enabled: form.enabled.checked,
     granted: form.granted.checked,
     op: form.op.value,
@@ -1361,6 +1370,28 @@ document.getElementById("doctorRefresh").addEventListener("click", () => runActi
 document.getElementById("doctorAutoRepair").addEventListener("click", () => runDoctorRepair("auto"));
 document.getElementById("doctorRepairModel").addEventListener("click", () => runDoctorRepair("model"));
 document.getElementById("doctorRepairTelegram").addEventListener("click", () => runDoctorRepair("telegram"));
+document.getElementById("selfLearningSettings").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const result = await runAction("Self learning", () => savePatch(patchFromDottedForm("selfLearningSettings")), "Settings saved");
+  renderResult("learningOutput", { ok: true, message: "Self learning settings saved", ...result });
+  await renderSelfLearning();
+});
+document.getElementById("selfLearningRefresh").addEventListener("click", () => runAction("Self learning", renderSelfLearning, "Tail refreshed"));
+document.getElementById("selfLearningRun").addEventListener("click", async () => {
+  const result = await runAction("Self learning", () => api("/api/self-learning/run", { method: "POST", body: JSON.stringify({}) }), "Diagnosis finished");
+  renderResult("learningOutput", result);
+  await renderSelfLearning();
+});
+document.getElementById("selfLearningStart").addEventListener("click", async () => {
+  const result = await runAction("Self learning", () => api("/api/self-learning/start", { method: "POST", body: JSON.stringify({}) }), "Loop started");
+  renderResult("learningOutput", result);
+  await renderSelfLearning();
+});
+document.getElementById("selfLearningStop").addEventListener("click", async () => {
+  const result = await runAction("Self learning", () => api("/api/self-learning/stop", { method: "POST", body: JSON.stringify({}) }), "Loop stopped");
+  renderResult("learningOutput", result);
+  await renderSelfLearning();
+});
 
 async function renderLogs() {
   renderLogsView(await api("/api/logs"));
@@ -1399,7 +1430,45 @@ function renderLogsView(data) {
   tools.slice(0, 10).forEach((tool) => {
     toolsPanel.appendChild(activityItem(tool.name, `${tool.available ? "Available" : "Unavailable"} | ${tool.details || tool.provider}`));
   });
-  node.append(modelPanel, telegramPanel, sessionPanel, toolsPanel);
+  const learningPanel = document.createElement("section");
+  learningPanel.className = "dashboard-panel";
+  const learning = data.self_learning || {};
+  const worker = learning.worker || {};
+  learningPanel.appendChild(activityItem("Self learning", worker.running ? "Running" : worker.last_error || "Stopped"));
+  learningPanel.appendChild(activityItem("Cycles", `${worker.cycles || 0} cycle(s), ${worker.repairs || 0} repair(s)`));
+  (learning.log?.lines || []).slice(-8).forEach((line) => {
+    if (line) learningPanel.appendChild(activityItem("self log", line));
+  });
+  node.append(modelPanel, telegramPanel, learningPanel, sessionPanel, toolsPanel);
+}
+
+async function renderSelfLearning() {
+  renderSelfLearningView(await api("/api/self-learning?lines=50"));
+}
+
+function renderSelfLearningView(data) {
+  const worker = data.worker || {};
+  const log = data.log || {};
+  document.getElementById("learningWorkerState").textContent = worker.running ? "Running" : worker.last_error || "Stopped";
+  document.getElementById("learningCycleCount").textContent = String(worker.cycles || 0);
+  document.getElementById("learningSummary").textContent = worker.last_summary || (data.enabled ? "Ready to diagnose and repair safe issues." : "Self learning is disabled.");
+  document.getElementById("learningLogPath").textContent = log.path || "log";
+  const status = document.getElementById("learningStatus");
+  status.innerHTML = "";
+  status.appendChild(activityItem("Enabled", data.enabled ? "Yes" : "No"));
+  status.appendChild(activityItem("Worker", worker.running ? "Running" : worker.thread_alive ? "Alive" : "Stopped"));
+  status.appendChild(activityItem("Auto repair", data.auto_repair ? "Enabled" : "Disabled"));
+  status.appendChild(activityItem("Last cycle", formatTime(worker.last_cycle_at)));
+  status.appendChild(activityItem("Last repair", formatTime(worker.last_repair_at)));
+  if (worker.last_error) status.appendChild(activityItem("Last error", worker.last_error));
+  const tail = document.getElementById("learningLog");
+  tail.innerHTML = "";
+  const lines = log.lines || [];
+  if (!lines.length) {
+    tail.appendChild(activityItem("No self-learning log yet", "Run Diagnosis Now or wait for the loop."));
+  } else {
+    lines.slice(-50).forEach((line) => tail.appendChild(activityItem("tail", line)));
+  }
 }
 
 async function renderUpdateStatus(refreshRemote = false) {

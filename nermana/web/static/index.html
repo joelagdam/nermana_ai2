@@ -30,6 +30,7 @@
           <button data-page="providers"><span></span>Providers</button>
           <button data-page="phone"><span></span>Phone</button>
           <button data-page="telegram"><span></span>Telegram</button>
+          <button data-page="learning"><span></span>Self Learning</button>
           <button data-page="logs"><span></span>Logs</button>
           <button data-page="settings"><span></span>Settings</button>
         </nav>
@@ -348,6 +349,7 @@
             <label>Termux <input name="phone.termux_enabled" type="checkbox" /></label>
             <label>Shizuku <input name="phone.shizuku_enabled" type="checkbox" /></label>
             <label>rish path <input name="phone.rish_path" /></label>
+            <label>Allowed Termux commands <textarea name="phone.allowed_termux_commands" rows="4"></textarea></label>
             <label>Autonomy
               <select name="safety.max_tool_risk">
                 <option value="read">read</option>
@@ -366,11 +368,13 @@
             <label>Namespace <input name="namespace" value="system" /></label>
             <label>Key <input name="key" /></label>
             <label>Value <input name="value" /></label>
+            <label>Termux command <input name="command" placeholder="python -m nermana doctor" /></label>
             <label>Enabled <input name="enabled" type="checkbox" checked /></label>
             <label>Granted <input name="granted" type="checkbox" checked /></label>
             <label>AppOp <input name="op" /></label>
             <label>Mode <input name="mode" /></label>
             <select name="tool">
+              <option value="termux_command">termux_command</option>
               <option value="force_stop_app">force_stop_app</option>
               <option value="set_app_enabled">set_app_enabled</option>
               <option value="set_permission">set_permission</option>
@@ -402,6 +406,51 @@
 
         <section id="logs" class="page">
           <div id="logsOutput" class="dashboard-layout"></div>
+        </section>
+
+        <section id="learning" class="page">
+          <div class="dashboard-hero">
+            <div>
+              <p class="eyebrow">Always-on diagnostics</p>
+              <h2>Self Learning Loop</h2>
+              <p id="learningSummary">Watching Doctor signals, memory consolidation, and safe repair opportunities.</p>
+            </div>
+            <div class="rank-readout">
+              <strong id="learningCycleCount">0</strong>
+              <span>cycles</span>
+            </div>
+          </div>
+          <form id="selfLearningSettings" class="grid-form">
+            <label>Enabled <input name="self_learning.enabled" type="checkbox" /></label>
+            <label>Auto repair <input name="self_learning.auto_repair" type="checkbox" /></label>
+            <label>Interval seconds <input name="self_learning.interval_seconds" type="number" min="60" step="30" /></label>
+            <label>Repair cooldown seconds <input name="self_learning.repair_cooldown_seconds" type="number" min="30" step="30" /></label>
+            <label>Tail lines <input name="self_learning.tail_lines" type="number" min="1" max="500" /></label>
+            <button class="primary-action">Save Self Learning</button>
+          </form>
+          <div class="toolbar">
+            <button id="selfLearningRefresh" type="button">Refresh Tail</button>
+            <button id="selfLearningRun" type="button" class="primary-action">Run Diagnosis Now</button>
+            <button id="selfLearningStart" type="button">Start Loop</button>
+            <button id="selfLearningStop" type="button">Stop Loop</button>
+          </div>
+          <div class="dashboard-layout">
+            <section class="dashboard-panel">
+              <div class="panel-heading">
+                <h3>Status</h3>
+                <span id="learningWorkerState">Checking</span>
+              </div>
+              <div id="learningStatus" class="activity-list"></div>
+            </section>
+            <section class="dashboard-panel">
+              <div class="panel-heading">
+                <h3>Latest 50</h3>
+                <span id="learningLogPath">log</span>
+              </div>
+              <div id="learningLog" class="activity-list"></div>
+            </section>
+          </div>
+          <div id="learningOutput" class="result-panel"></div>
         </section>
 
         <section id="settings" class="page">

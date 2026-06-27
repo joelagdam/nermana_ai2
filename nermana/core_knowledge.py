@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-CORE_KNOWLEDGE_VERSION = "2026-06-27.1"
+CORE_KNOWLEDGE_VERSION = "2026-06-27.2"
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,7 @@ CORE_KNOWLEDGE: tuple[KnowledgeCard, ...] = (
             "Primary commands: /tools or /capabilities for live capability status; /weather [city] for Open-Meteo weather; "
             "/search [query] for web search with DuckDuckGo, Wikipedia, Hacker News, and SearXNG when configured; "
             "/read [path] for allowed file reading; /index [path] for file-to-memory indexing; /phone for Termux phone status; "
+            "/termux [allowlisted command] for guarded Termux command execution; "
             "/image [prompt] and /vision [path] [question] when providers are configured. "
             "Plain language requests can trigger safe tools when useful; risky phone controls and memory saves need confirmation."
         ),
@@ -70,6 +71,16 @@ CORE_KNOWLEDGE: tuple[KnowledgeCard, ...] = (
             "prefer /no_think for short ordinary answers, cap short-answer output tokens, use mlock when memory allows, avoid huge tool dumps, and use smaller GGUF models for fast replies. "
             "Core deterministic answers such as capability, command, and repair reports should bypass the LLM and return in under a second. "
             "Full model answers are hardware-bound; Qwen 0.6B is faster than larger models but less accurate."
+        ),
+    ),
+    KnowledgeCard(
+        key="self_learning_loop",
+        title="Self Learning Loop",
+        tags=("self", "learning", "doctor", "repair", "diagnostic", "logs", "always-on"),
+        content=(
+            "The self-learning loop is an always-on operational monitor, not real consciousness. "
+            "It runs Doctor diagnostics, writes the latest events to data/logs/self-learning.log, and can run safe Auto Repair when warn/error issues appear. "
+            "The web Self Learning page shows worker state and the latest 50 log lines."
         ),
     ),
     KnowledgeCard(

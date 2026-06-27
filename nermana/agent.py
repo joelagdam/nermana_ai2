@@ -418,7 +418,7 @@ class AgentCore:
 
     def _direct_tool(self, message: str) -> dict[str, Any] | None:
         lower = message.lower()
-        command_match = re.match(r"^/(search|weather|read|index|image|vision|models|phone)\b\s*(.*)", message, re.I)
+        command_match = re.match(r"^/(search|weather|read|index|image|vision|models|phone|termux)\b\s*(.*)", message, re.I)
         if command_match:
             command = command_match.group(1).lower()
             rest = command_match.group(2).strip()
@@ -437,6 +437,8 @@ class AgentCore:
                 return {"tool": "vision_analyze", "payload": {"path": parts[0], "question": parts[1] if len(parts) > 1 else ""}, "tool_only": False}
             if command == "phone":
                 return {"tool": "phone_status", "payload": {}, "tool_only": False}
+            if command == "termux":
+                return {"tool": "termux_command", "payload": {"command": rest}, "tool_only": True}
         if lower.startswith("read file "):
             return {"tool": "read_file", "payload": {"path": message[10:].strip()}, "tool_only": False}
         return None
@@ -539,7 +541,7 @@ class AgentCore:
             "vision endpoint configured" if self.config.providers.vision_enabled and self.config.providers.vision_endpoint else "vision endpoint not configured",
         ]
         lines.append("Provider state: " + "; ".join(provider_bits) + ".")
-        lines.append("Commands I recognize: /tools, /weather, /search, /read, /phone, /image, /vision.")
+        lines.append("Commands I recognize: /tools, /weather, /search, /read, /phone, /termux, /image, /vision.")
         return "\n".join(lines)
 
     def _should_report_core_knowledge(self, message: str) -> bool:
@@ -608,7 +610,7 @@ class AgentCore:
             "vision": {"vision_analyze"},
             "phone": {"phone_status", "open_url", "list_packages", "force_stop_app", "set_app_enabled", "set_permission", "appops_set", "settings_get", "settings_put"},
             "shizuku": {"list_packages", "force_stop_app", "set_app_enabled", "set_permission", "appops_set", "settings_get", "settings_put"},
-            "termux": {"phone_status", "open_url"},
+            "termux": {"phone_status", "open_url", "termux_command"},
         }
         names: set[str] = set()
         for word, mapped in aliases.items():

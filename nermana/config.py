@@ -109,6 +109,9 @@ class PhoneConfig:
     command_timeout_seconds: float = 12.0
     autonomy: str = "power_user"
     allowed_settings_namespaces: list[str] = field(default_factory=lambda: ["system", "secure", "global"])
+    allowed_termux_commands: list[str] = field(
+        default_factory=lambda: ["date", "df", "free", "git", "ls", "pwd", "python", "termux-battery-status", "termux-info", "uptime", "whoami"]
+    )
 
 
 @dataclass
@@ -127,6 +130,16 @@ class MemoryConfig:
     auto_remember: bool = True
     consolidate_every_seconds: float = 900.0
     min_consolidate_items: int = 4
+
+
+@dataclass
+class SelfLearningConfig:
+    enabled: bool = True
+    auto_repair: bool = True
+    interval_seconds: float = 300.0
+    repair_cooldown_seconds: float = 600.0
+    log_path: str = "data/logs/self-learning.log"
+    tail_lines: int = 50
 
 
 @dataclass
@@ -150,6 +163,7 @@ class AppConfig:
     phone: PhoneConfig = field(default_factory=PhoneConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    self_learning: SelfLearningConfig = field(default_factory=SelfLearningConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     tool_enabled: dict[str, bool] = field(default_factory=dict)
 
@@ -167,6 +181,7 @@ def ensure_runtime_dirs(config: AppConfig | None = None) -> None:
     if config is not None:
         resolve_path(config.model.models_dir).mkdir(parents=True, exist_ok=True)
         resolve_path(config.memory.db_path).parent.mkdir(parents=True, exist_ok=True)
+        resolve_path(config.self_learning.log_path).parent.mkdir(parents=True, exist_ok=True)
         for folder in config.files.allowed_dirs:
             try:
                 resolve_path(folder).mkdir(parents=True, exist_ok=True)
