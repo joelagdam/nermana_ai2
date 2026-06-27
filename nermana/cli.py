@@ -5,6 +5,7 @@ import json
 from .agent import AgentCore
 from .capabilities import collect_capabilities
 from .config import load_config, merge_config, save_config
+from .core_knowledge import core_knowledge_report, knowledge_status, search_core_knowledge
 from .telegram_bot import TelegramBot
 from .updater import update_system
 
@@ -26,6 +27,8 @@ def main(argv: list[str] | None = None) -> None:
     memory = sub.add_parser("memory")
     memory.add_argument("--search")
     memory.add_argument("--add")
+    knowledge = sub.add_parser("knowledge")
+    knowledge.add_argument("--search")
     telegram = sub.add_parser("telegram")
     telegram.add_argument("--once", action="store_true")
     sub.add_parser("start")
@@ -65,6 +68,12 @@ def main(argv: list[str] | None = None) -> None:
             print(json.dumps([hit.__dict__ for hit in agent.memory.search(args.search)], indent=2))
         else:
             print(json.dumps(agent.memory.list_memories(), indent=2))
+    elif args.command == "knowledge":
+        if args.search:
+            print(json.dumps([card.__dict__ for card in search_core_knowledge(args.search, limit=8)], indent=2))
+        else:
+            print(json.dumps(knowledge_status(), indent=2))
+            print(core_knowledge_report("commands self repair performance", limit=8))
     elif args.command == "telegram":
         bot = TelegramBot(agent)
         if args.once:

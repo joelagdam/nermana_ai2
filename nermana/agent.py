@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from .config import AppConfig, load_config
+from .core_knowledge import core_knowledge_context, core_knowledge_report, knowledge_status
 from .memory import MemoryStore
 from .models import ModelManager
 from .tooling import ToolRegistry
@@ -43,6 +44,10 @@ class AgentCore:
 
         if self._should_report_capabilities(message):
             answer = self._capability_self_report(message)
+            return self._finish(session_id, message, answer, core_answer=True)
+
+        if self._should_report_core_knowledge(message):
+            answer = self._core_knowledge_self_report(message)
             return self._finish(session_id, message, answer, core_answer=True)
 
         direct = self._direct_tool(message)
@@ -199,6 +204,9 @@ class AgentCore:
             context_parts.append("Compressed memory insights:\n" + "\n".join(f"- {self._compact_text(item['insight'], 320)}" for item in consolidations))
         if tool_context:
             context_parts.append("Tool context:\n" + self._compact_text(tool_context, 3200))
+        built_in_knowledge = core_knowledge_context(message, limit=2)
+        if built_in_knowledge:
+            context_parts.append(self._compact_text(built_in_knowledge, 1200))
         history = self._prompt_history(session_id, message, force_fresh=force_fresh)
         messages = [{"role": "system", "content": system}]
         if context_parts:
@@ -533,6 +541,61 @@ class AgentCore:
         lines.append("Provider state: " + "; ".join(provider_bits) + ".")
         lines.append("Commands I recognize: /tools, /weather, /search, /read, /phone, /image, /vision.")
         return "\n".join(lines)
+
+    def _should_report_core_knowledge(self, message: str) -> bool:
+        lower = message.lower().strip()
+        if lower.startswith("/"):
+            return re.match(r"^/(knowledge|commands|repair|performance)\b", lower) is not None
+        phrases = [
+            "pre-trained",
+            "pretrained",
+            "training data",
+            "core knowledge",
+            "built in knowledge",
+            "command usage",
+            "tool usage",
+            "slash command",
+            "what commands",
+            "which commands",
+            "how do i use commands",
+            "how to use commands",
+            "self repair",
+            "repair model",
+            "repair yourself",
+            "doctor page",
+            "diagnose yourself",
+            "loading model",
+            "503",
+            "context mismatch",
+            "reply faster",
+            "replies faster",
+            "faster reply",
+            "fast reply",
+            "fast replies",
+            "make you faster",
+            "make phone llm",
+            "phone llm replies",
+            "llm reply speed",
+            "llm replies faster",
+            "latency",
+            "performance",
+            "speed up",
+            "model management",
+            "telegram repair",
+        ]
+        return any(phrase in lower for phrase in phrases)
+
+    def _core_knowledge_self_report(self, message: str) -> str:
+        status = knowledge_status()
+        report = core_knowledge_report(message, limit=4)
+        model_health = self.models.runtime_status(max_age_seconds=30)
+        active_tools = [tool for tool in self.tools.list_metadata() if tool.get("enabled") and tool.get("available")]
+        live = [
+            f"Live model: {'ready' if model_health.get('ok') else model_health.get('state') or model_health.get('error') or 'unavailable'}.",
+            f"Live tools: {len(active_tools)} active.",
+            f"Knowledge cards: {status['cards']} local cards, version {status['version']}.",
+        ]
+        return "\n".join(live) + "\n\n" + report
 
     def _focused_capability_names(self, message: str) -> set[str]:
         lower = message.lower()
@@ -958,6 +1021,7 @@ class AgentCore:
                 "base_url": self.config.model.base_url,
                 "thinking_mode": self.config.model.thinking_mode,
             },
+            "core_knowledge": knowledge_status(),
             "model_health": self.models.runtime_status(),
             "tools": self.tools.list_metadata(),
             "sessions": self.memory.list_sessions(),

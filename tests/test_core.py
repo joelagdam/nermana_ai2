@@ -10,6 +10,7 @@ from pathlib import Path
 from nermana.agent import AgentCore
 from nermana.capabilities import Capability
 from nermana.config import AppConfig, FileConfig, MemoryConfig, ModelConfig, SafetyConfig, SearchConfig, TelegramConfig, merge_config, reset_config_defaults, save_config
+from nermana.core_knowledge import knowledge_status, search_core_knowledge
 from nermana.http_client import HttpResponse
 from nermana.model_downloads import delete_partial_download, download_model, list_partial_downloads, list_presets
 from nermana.memory import MemoryStore
@@ -676,6 +677,73 @@ class AgentTests(unittest.TestCase):
             self.assertIn("Active tools", result["reply"])
             self.assertIn("current_weather", result["reply"])
             self.assertIn("Decision policy", result["reply"])
+
+    def test_core_knowledge_search_finds_repair_and_performance(self) -> None:
+        repair = search_core_knowledge("self repair doctor loading model", limit=2)
+        performance = search_core_knowledge("reply faster performance tokens", limit=2)
+        self.assertTrue(any(card.key == "self_repair_doctor" for card in repair))
+        self.assertTrue(any(card.key == "performance_fast_reply" for card in performance))
+        self.assertGreaterEqual(knowledge_status()["cards"], 6)
+
+    def test_agent_reports_core_knowledge_without_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            health = {"ok": True, "state": "chat ready"}
+            with patch.object(agent.models, "runtime_status", return_value=health), patch.object(agent.models, "chat", side_effect=AssertionError("LLM should not run")):
+                result = agent.chat("how do you repair yourself and use commands?", session_id="knowledge")
+            self.assertTrue(result["core_answer"])
+            self.assertIn("Self Repair", result["reply"])
+            self.assertIn("/search", result["reply"])
+            self.assertIn("Knowledge cards", result["reply"])
+
+    def test_agent_reports_loading_model_repair_from_core_knowledge_without_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            health = {"ok": False, "state": "loading"}
+            with patch.object(agent.models, "runtime_status", return_value=health), patch.object(agent.models, "chat", side_effect=AssertionError("LLM should not run")):
+                result = agent.chat("what should I do about loading model 503?", session_id="knowledge-repair")
+            self.assertTrue(result["core_answer"])
+            self.assertIn("Repair Local Model", result["reply"])
+            self.assertIn("Doctor", result["reply"])
+
+    def test_agent_reports_phone_llm_performance_from_core_knowledge_without_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            health = {"ok": True, "state": "chat ready"}
+            with patch.object(agent.models, "runtime_status", return_value=health), patch.object(agent.models, "chat", side_effect=AssertionError("LLM should not run")):
+                result = agent.chat("give one practical tip to make phone LLM replies faster", session_id="knowledge-performance")
+            self.assertTrue(result["core_answer"])
+            self.assertIn("Performance And Fast Reply", result["reply"])
+            self.assertIn("under a second", result["reply"])
+
+    def test_agent_injects_relevant_core_knowledge_into_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")), model=ModelConfig(context_size=4096))
+            agent = AgentCore(cfg)
+            captured = []
+
+            def fake_chat(messages, max_tokens=512):
+                captured.append(messages)
+                return {"ok": True, "content": "Use Doctor first."}
+
+            with patch.object(agent.models, "chat", side_effect=fake_chat):
+                result = agent.chat("Give runtime diagnostic guidance for doctor model readiness.", session_id="knowledge-prompt")
+            prompt_text = str(captured[0])
+            self.assertEqual(result["reply"], "Use Doctor first.")
+            self.assertIn("Built-in Nermana knowledge", prompt_text)
+            self.assertIn("Doctor", prompt_text)
+
+    def test_agent_status_reports_core_knowledge_pack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            with patch.object(agent.models, "runtime_status", return_value={"ok": True}):
+                status = agent.status()
+            self.assertIn("core_knowledge", status)
+            self.assertGreaterEqual(status["core_knowledge"]["cards"], 6)
 
     def test_agent_reports_unavailable_focused_capabilities(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
