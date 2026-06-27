@@ -14,7 +14,7 @@ from nermana.core_knowledge import knowledge_status, search_core_knowledge
 from nermana.http_client import HttpResponse
 from nermana.model_downloads import delete_partial_download, download_model, list_partial_downloads, list_presets
 from nermana.memory import MemoryStore
-from nermana.models import ModelManager
+from nermana.models import ModelInfo, ModelManager
 from nermana.safety import DecisionGate
 from nermana.simple_server import SimpleNermanaServer, _decode_json_body, _query_int
 from nermana.startup import StartupManager
@@ -1210,6 +1210,31 @@ class DashboardTests(unittest.TestCase):
             actions = {action["key"] for action in snapshot["actions"]}
             self.assertIn("model", actions)
             self.assertIn("auto", actions)
+
+    def test_doctor_does_not_flag_idle_telegram_offset_as_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp) / "models"
+            models_dir.mkdir()
+            (models_dir / "phone.gguf").write_bytes(b"gguf")
+            cfg = AppConfig(
+                model=ModelConfig(models_dir=str(models_dir), active_model="phone.gguf", llama_server_path="/data/llama-server"),
+                telegram=TelegramConfig(enabled=True, token="token", offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            server = SimpleNermanaServer(agent)
+            health = {"ok": True, "state": "chat ready"}
+            with patch.object(agent.models, "runtime_status", return_value=health), patch.object(
+                agent.models, "llama_server_status", return_value={"available": True, "resolved": "/data/llama-server", "configured": "/data/llama-server"}
+            ), patch.object(agent.models, "scan", return_value=[ModelInfo("phone.gguf", str(models_dir / "phone.gguf"), 0.01, True, True)]), patch.object(
+                agent.models, "server_log_tail", return_value={"ok": True, "lines": []}
+            ), patch.object(
+                server, "telegram_worker_status", return_value={"ok": True, "running": True, "processed": 0, "offset": 123, "last_error": "", "thread_alive": True}
+            ):
+                snapshot = server.doctor_snapshot(force=True)
+            titles = [issue["title"] for issue in snapshot["issues"]]
+            self.assertNotIn("Telegram offset has old state", titles)
+            self.assertEqual(snapshot["summary"], "No blocking issues detected.")
 
     def test_doctor_repair_waits_for_loading_model_before_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -285,8 +285,6 @@ class SimpleNermanaServer:
                 if "webhook" in last_error.lower() or "conflict" in last_error.lower():
                     keys.append("telegram_clear")
                 add_issue("warn", "telegram", "Telegram worker has an error", last_error, keys)
-            if telegram_worker.get("processed", 0) == 0 and telegram_worker.get("offset", 0):
-                add_issue("info", "telegram", "Telegram offset has old state", "Drop pending updates if old messages keep repeating.", ["telegram_drop_pending"])
         else:
             add_issue("info", "telegram", "Telegram is not configured", "Paste a BotFather token and enable Telegram before polling.", [])
 
