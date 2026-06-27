@@ -1227,6 +1227,27 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(result["upstream"], "origin/main")
         self.assertEqual(result["target"]["source"], "origin fallback")
 
+    def test_update_status_ignores_runtime_data_and_models_dirty_entries(self) -> None:
+        def fake_git(args):
+            command = tuple(args)
+            responses = {
+                ("rev-parse", "--short", "HEAD"): {"ok": True, "stdout": "aaa111"},
+                ("rev-parse", "--abbrev-ref", "HEAD"): {"ok": True, "stdout": "main"},
+                ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): {"ok": True, "stdout": "origin/main"},
+                ("rev-parse", "--short", "origin/main"): {"ok": True, "stdout": "aaa111"},
+                ("rev-parse", "HEAD"): {"ok": True, "stdout": "aaa111full"},
+                ("rev-parse", "origin/main"): {"ok": True, "stdout": "aaa111full"},
+                ("merge-base", "HEAD", "origin/main"): {"ok": True, "stdout": "aaa111full"},
+                ("status", "--porcelain"): {"ok": True, "stdout": "?? data/\n?? models/Qwen.gguf"},
+            }
+            return responses.get(command, {"ok": False, "stderr": f"unexpected {args}"})
+
+        with patch("nermana.updater._git", side_effect=fake_git):
+            result = update_status(fetch=False)
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["dirty"])
+        self.assertEqual(result["dirty_files"], [])
+
     def test_update_system_merges_origin_fallback_without_upstream(self) -> None:
         state = {"updated": False}
 

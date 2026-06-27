@@ -9,6 +9,10 @@ from typing import Any
 from .config import DATA_DIR, DEFAULT_CONFIG_PATH, MODELS_DIR, PROJECT_ROOT
 
 
+UPDATE_SOURCE_PATHS = [".gitignore", "README.md", "config.termux.example.json", "nermana", "pyproject.toml", "requirements.txt", "scripts", "tests"]
+RUNTIME_PATH_PREFIXES = ("data/", "models/")
+
+
 def update_status(fetch: bool = False) -> dict[str, Any]:
     if not (PROJECT_ROOT / ".git").exists():
         return {"ok": False, "error": "This folder is not a git checkout."}
@@ -148,13 +152,21 @@ def _dirty_status() -> dict[str, Any]:
     status = _git(["status", "--porcelain"])
     if not status["ok"]:
         return {"ok": False, "dirty": False, "files": [], "error": status.get("stderr") or status.get("error", "")}
-    files = [line.strip() for line in status.get("stdout", "").splitlines() if line.strip()]
+    files = [line.strip() for line in status.get("stdout", "").splitlines() if line.strip() and not _runtime_status_line(line)]
     return {"ok": True, "dirty": bool(files), "files": files[:40], "count": len(files)}
 
 
 def _stash_worktree() -> dict[str, Any]:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    return _git(["stash", "push", "--include-untracked", "-m", f"nermana-auto-update-{stamp}"])
+    return _git(["stash", "push", "--include-untracked", "-m", f"nermana-auto-update-{stamp}", "--", *UPDATE_SOURCE_PATHS])
+
+
+def _runtime_status_line(line: str) -> bool:
+    path = line[3:].strip() if len(line) > 3 else line.strip()
+    if " -> " in path:
+        path = path.rsplit(" -> ", 1)[1].strip()
+    normalized = path.replace("\\", "/")
+    return normalized.startswith(RUNTIME_PATH_PREFIXES)
 
 
 def _git(args: list[str]) -> dict[str, Any]:
