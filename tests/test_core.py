@@ -702,6 +702,14 @@ class AgentTests(unittest.TestCase):
             self.assertIn("Nermana", result["reply"])
             self.assertIn("local-first", result["reply"])
 
+    def test_agent_shortens_loading_model_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            message = agent._friendly_model_error("HTTP Error 503: Service Unavailable: Loading model")
+            self.assertIn("still loading", message)
+            self.assertIn("Doctor", message)
+
     def test_agent_initiates_learning_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
@@ -797,6 +805,16 @@ class TelegramTests(unittest.TestCase):
             self.assertEqual(len(sent_texts), 1)
             self.assertIn("context window", sent_texts[0])
             self.assertNotIn("HTTP Error 400", sent_texts[0])
+
+    def test_telegram_shortens_loading_model_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            reply = TelegramBot(AgentCore(cfg))._short_chat_error("HTTP Error 503: Service Unavailable: Loading model")
+            self.assertIn("still loading", reply)
+            self.assertIn("Doctor", reply)
 
     def test_telegram_persists_offset_between_instances(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -957,6 +975,52 @@ class DashboardTests(unittest.TestCase):
             self.assertGreaterEqual(snapshot["stats"]["workers_total"], 1)
             self.assertEqual(snapshot["stats"]["memories"], 1)
             self.assertTrue(any(worker["name"] == "Internet" for worker in snapshot["workers"]))
+
+    def test_doctor_snapshot_reports_loading_model_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp) / "models"
+            models_dir.mkdir()
+            (models_dir / "phone.gguf").write_bytes(b"gguf")
+            cfg = AppConfig(
+                model=ModelConfig(models_dir=str(models_dir), active_model="phone.gguf"),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            server = SimpleNermanaServer(agent)
+            health = {
+                "ok": False,
+                "endpoint_ok": True,
+                "state": "endpoint reachable, chat failed",
+                "chat_check": {"ok": False, "error": "HTTP Error 503: Service Unavailable: Loading model"},
+            }
+            with patch.object(agent.models, "runtime_status", return_value=health), patch.object(
+                agent.models, "llama_server_status", return_value={"available": True, "resolved": "/data/llama-server", "configured": "auto"}
+            ), patch.object(agent.models, "server_log_tail", return_value={"ok": True, "lines": []}):
+                snapshot = server.doctor_snapshot(force=True)
+            self.assertIn("Model is still loading", [issue["title"] for issue in snapshot["issues"]])
+            actions = {action["key"] for action in snapshot["actions"]}
+            self.assertIn("model", actions)
+            self.assertIn("auto", actions)
+
+    def test_doctor_repair_waits_for_loading_model_before_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp) / "models"
+            models_dir.mkdir()
+            (models_dir / "phone.gguf").write_bytes(b"gguf")
+            cfg = AppConfig(
+                model=ModelConfig(models_dir=str(models_dir), active_model="phone.gguf"),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            server = SimpleNermanaServer(agent)
+            loading = {"ok": False, "endpoint_ok": True, "chat_check": {"error": "HTTP Error 503: Service Unavailable: Loading model"}}
+            ready = {"ok": True, "endpoint_ok": True, "state": "chat ready"}
+            with patch.object(agent.models, "runtime_status", side_effect=[loading, ready]), patch.object(
+                agent.models, "restart_server", side_effect=AssertionError("restart should wait first")
+            ), patch("nermana.simple_server.time.sleep", return_value=None):
+                result = server.repair_model_server()
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["waited"])
 
 
 if __name__ == "__main__":

@@ -247,6 +247,8 @@ class TelegramBot:
             )
         if any(part in lower for part in ["connection refused", "failed to establish", "not responding", "timed out", "timeout"]):
             return "The local model is not reachable right now. Web/core memory still works; start or restart llama.cpp from Models."
+        if "loading model" in lower or ("http error 503" in lower and "service unavailable" in lower):
+            return "The local model is still loading. I am online, but the GGUF voice engine is not ready yet. Open Web > Doctor and run Repair Local Model, or retry after it finishes loading."
         if "bad request" in lower or "http error 400" in lower:
             return "The local model rejected the request. Check the active model, server model id, and context size in Models."
         compact = " ".join(message.split())

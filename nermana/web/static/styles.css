@@ -398,6 +398,72 @@ p {
   margin-bottom: 12px;
 }
 
+.doctor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.doctor-hero {
+  border-color: rgba(0, 152, 199, 0.24);
+}
+
+.doctor-layout .dashboard-panel:first-child {
+  grid-row: span 2;
+}
+
+.doctor-list {
+  display: grid;
+  gap: 8px;
+}
+
+.doctor-card {
+  display: grid;
+  gap: 8px;
+  padding: 11px;
+  border: 1px solid rgba(174, 184, 203, 0.66);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.94);
+}
+
+.doctor-card.info {
+  border-left-color: var(--cyan);
+}
+
+.doctor-card.warn {
+  border-left-color: var(--amber);
+}
+
+.doctor-card.error {
+  border-left-color: var(--danger);
+}
+
+.doctor-card-heading {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.doctor-card-heading strong,
+.doctor-card p {
+  overflow-wrap: anywhere;
+}
+
+.doctor-card-heading span,
+.doctor-card p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.doctor-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 .segmented-tabs {
   display: flex;
   flex-wrap: wrap;

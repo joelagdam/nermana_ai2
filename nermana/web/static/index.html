@@ -21,6 +21,7 @@
         </div>
         <nav id="nav" class="tab-nav" aria-label="Main tabs">
           <button data-page="dashboard" class="active"><span></span>Dashboard</button>
+          <button data-page="doctor"><span></span>Doctor</button>
           <button data-page="chat"><span></span>Chat</button>
           <button data-page="models"><span></span>Models</button>
           <button data-page="tools"><span></span>Tools</button>
@@ -60,6 +61,7 @@
           <div id="dashboardStats" class="metric-grid"></div>
           <div class="dashboard-actions">
             <button type="button" data-jump="chat">Open Chat</button>
+            <button type="button" data-jump="doctor">Doctor</button>
             <button type="button" data-jump="models">Models</button>
             <button type="button" data-jump="tools">Tools</button>
             <button type="button" data-jump="providers">Providers</button>
@@ -85,6 +87,56 @@
                 <span id="downloadHealthLabel">Idle</span>
               </div>
               <div id="downloadList" class="activity-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="doctor" class="page">
+          <div class="dashboard-hero doctor-hero">
+            <div>
+              <p class="eyebrow">Self repair</p>
+              <h2>Nermana Doctor</h2>
+              <p id="doctorSummary">Checking model, Telegram, tools, and startup health.</p>
+            </div>
+            <div class="rank-readout">
+              <strong id="doctorIssueCount">0</strong>
+              <span>issues</span>
+            </div>
+          </div>
+          <div class="doctor-actions">
+            <button id="doctorRefresh" type="button">Run Diagnostics</button>
+            <button id="doctorAutoRepair" type="button" class="primary-action">Auto Repair</button>
+            <button id="doctorRepairModel" type="button">Repair Local Model</button>
+            <button id="doctorRepairTelegram" type="button">Repair Telegram</button>
+          </div>
+          <div class="dashboard-layout doctor-layout">
+            <section class="dashboard-panel">
+              <div class="panel-heading">
+                <h3>Issues</h3>
+                <span id="doctorGeneratedAt">Not checked</span>
+              </div>
+              <div id="doctorIssues" class="doctor-list"></div>
+            </section>
+            <section class="dashboard-panel">
+              <div class="panel-heading">
+                <h3>Repair Actions</h3>
+                <span>safe first</span>
+              </div>
+              <div id="doctorActions" class="doctor-list"></div>
+            </section>
+            <section class="dashboard-panel">
+              <div class="panel-heading">
+                <h3>Checks</h3>
+                <span>live status</span>
+              </div>
+              <div id="doctorChecks" class="doctor-list"></div>
+            </section>
+            <section class="dashboard-panel">
+              <div class="panel-heading">
+                <h3>Repair Log</h3>
+                <span id="doctorRepairState">Idle</span>
+              </div>
+              <div id="doctorOutput" class="doctor-list"></div>
             </section>
           </div>
         </section>

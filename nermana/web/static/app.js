@@ -1,6 +1,7 @@
 let config = {};
 let statusCache = {};
 let dashboardCache = {};
+let doctorCache = {};
 let chatInitiated = false;
 let activeDownloadJobId = "";
 
@@ -220,6 +221,7 @@ async function refreshAll() {
   updateChatPresence();
   fillForms();
   renderDashboard(dashboardCache);
+  await renderDoctor(false);
   await renderPresets();
   await renderPartials();
   await renderModels();
@@ -457,6 +459,137 @@ function renderDownloads(downloads) {
     const title = job.filename || job.id || "model download";
     const detail = `${job.state || "unknown"} | ${job.percent ? `${Number(job.percent).toFixed(1)}%` : formatTime(job.updated_at)}`;
     list.appendChild(activityItem(title, detail));
+  });
+}
+
+async function renderDoctor(force = false) {
+  const suffix = force ? "?force=1" : "?force=0";
+  doctorCache = await api(`/api/doctor${suffix}`);
+  renderDoctorView(doctorCache);
+  return doctorCache;
+}
+
+function renderDoctorView(data) {
+  const issues = data.issues || [];
+  document.getElementById("doctorSummary").textContent = data.summary || "Diagnostics ready.";
+  document.getElementById("doctorIssueCount").textContent = String(issues.length);
+  document.getElementById("doctorGeneratedAt").textContent = formatTime(data.generated_at);
+  renderDoctorIssues(issues);
+  renderDoctorActions(data.actions || []);
+  renderDoctorChecks(data.checks || {});
+}
+
+function renderDoctorIssues(issues) {
+  const list = document.getElementById("doctorIssues");
+  list.innerHTML = "";
+  if (!issues.length) {
+    list.appendChild(activityItem("No blocking issues", "Model, tools, and workers have no detected blockers."));
+    return;
+  }
+  issues.forEach((issue) => {
+    const item = document.createElement("div");
+    item.className = `doctor-card ${issue.severity || "info"}`;
+    const heading = document.createElement("div");
+    heading.className = "doctor-card-heading";
+    const title = document.createElement("strong");
+    title.textContent = issue.title || "Issue";
+    const tag = document.createElement("span");
+    tag.textContent = `${issue.area || "system"} | ${issue.severity || "info"}`;
+    heading.append(title, tag);
+    const detail = document.createElement("p");
+    detail.textContent = issue.detail || "";
+    item.append(heading, detail);
+    if ((issue.actions || []).length) {
+      const row = document.createElement("div");
+      row.className = "doctor-card-actions";
+      issue.actions.forEach((action) => {
+        row.appendChild(button(actionLabel(action), () => runDoctorRepair(action), action === "auto"));
+      });
+      item.appendChild(row);
+    }
+    list.appendChild(item);
+  });
+}
+
+function renderDoctorActions(actions) {
+  const list = document.getElementById("doctorActions");
+  list.innerHTML = "";
+  if (!actions.length) {
+    list.appendChild(activityItem("No repair actions required", "Run diagnostics again after changing settings."));
+    return;
+  }
+  actions.forEach((action) => {
+    const run = button("Run", () => runDoctorRepair(action.key), action.key === "auto");
+    list.appendChild(makeRow(action.label || action.key, `${action.risk || "safe"} | ${action.detail || ""}`, [run]));
+  });
+}
+
+function renderDoctorChecks(checks) {
+  const list = document.getElementById("doctorChecks");
+  list.innerHTML = "";
+  const model = checks.model || {};
+  const llama = checks.llama_server || {};
+  const models = checks.models || {};
+  const telegram = checks.telegram_worker || {};
+  const tools = checks.tools || {};
+  list.appendChild(activityItem("Local model", model.ok ? "Ready" : model.chat_check?.error || model.error || model.state || "Unavailable"));
+  list.appendChild(activityItem("Active GGUF", `${models.active || "none"} | ${models.loadable_count || 0}/${models.count || 0} loadable`));
+  list.appendChild(activityItem("llama-server", llama.available ? llama.resolved || "detected" : "not detected"));
+  list.appendChild(activityItem("Telegram", telegram.running ? `polling | processed ${telegram.processed || 0}` : telegram.last_error || "stopped"));
+  list.appendChild(activityItem("Tools", `${tools.available || 0}/${tools.total || 0} available, ${tools.enabled || 0} enabled`));
+  (checks.llama_log?.lines || []).slice(-3).forEach((line) => {
+    if (line) list.appendChild(activityItem("llama log", line));
+  });
+}
+
+function actionLabel(action) {
+  const labels = {
+    auto: "Auto Repair",
+    model: "Repair Model",
+    llama_detect: "Use Detected llama",
+    telegram: "Repair Telegram",
+    telegram_clear: "Clear Webhook",
+    telegram_drop_pending: "Drop Pending",
+  };
+  return labels[action] || action;
+}
+
+async function runDoctorRepair(action) {
+  const result = await runAction(
+    "Doctor",
+    () => api("/api/doctor/repair", { method: "POST", body: JSON.stringify({ action }) }),
+    "Repair finished"
+  );
+  renderDoctorRepairResult(result);
+  if (result.diagnostics) {
+    doctorCache = result.diagnostics;
+    renderDoctorView(doctorCache);
+  } else {
+    await renderDoctor(true);
+  }
+  await refreshAfterDoctorRepair();
+}
+
+async function refreshAfterDoctorRepair() {
+  dashboardCache = await api("/api/dashboard");
+  statusCache = { agent: dashboardCache.agent, capabilities: dashboardCache.capabilities };
+  statusLine.textContent = summarizeStatus(statusCache);
+  renderStatusPills(statusCache);
+  updateChatPresence();
+  renderDashboard(dashboardCache);
+  await renderModels();
+  await renderLogs();
+}
+
+function renderDoctorRepairResult(result) {
+  const node = document.getElementById("doctorOutput");
+  const state = document.getElementById("doctorRepairState");
+  node.innerHTML = "";
+  state.textContent = result.ok ? "Finished" : "Needs attention";
+  node.appendChild(activityItem(result.summary || "Repair finished", `action ${result.action || "unknown"}`));
+  (result.steps || []).forEach((step) => {
+    const detail = step.result?.message || step.result?.error || step.result?.start?.message || step.result?.health?.state || "completed";
+    node.appendChild(activityItem(`${step.ok ? "OK" : "Issue"}: ${step.name}`, detail));
   });
 }
 
@@ -1223,6 +1356,11 @@ document.getElementById("telegramResetOffset").addEventListener("click", async (
   const result = await runAction("Telegram", () => api("/api/telegram/reset_offset", { method: "POST", body: JSON.stringify({ drop_pending_updates: true }) }), "Pending updates dropped");
   renderResult("telegramOutput", result);
 });
+
+document.getElementById("doctorRefresh").addEventListener("click", () => runAction("Doctor", () => renderDoctor(true), "Diagnostics complete"));
+document.getElementById("doctorAutoRepair").addEventListener("click", () => runDoctorRepair("auto"));
+document.getElementById("doctorRepairModel").addEventListener("click", () => runDoctorRepair("model"));
+document.getElementById("doctorRepairTelegram").addEventListener("click", () => runDoctorRepair("telegram"));
 
 async function renderLogs() {
   renderLogsView(await api("/api/logs"));

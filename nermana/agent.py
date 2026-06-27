@@ -625,6 +625,8 @@ class AgentCore:
                     f"while Nermana is configured for {configured} tokens. Restart the model server from Models so it uses the saved context."
                 )
             return "Local model status: llama.cpp rejected the prompt because its live context window is too small. Restart from Models with a larger context."
+        if "loading model" in lower or ("http error 503" in lower and "service unavailable" in lower):
+            return "Local model status: llama.cpp is still loading the GGUF. Wait a moment, or open Doctor and run Repair Local Model if it stays stuck."
         if any(part in lower for part in ["connection refused", "failed to establish", "not responding", "timed out", "timeout"]):
             return "Local model status: llama.cpp is not reachable. Start or restart it from Models; core memory and safe tools remain available."
         if "bad request" in lower or "http error 400" in lower:

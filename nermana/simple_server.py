@@ -210,6 +210,179 @@ class SimpleNermanaServer:
             "downloads": downloads[:6],
         }
 
+    def doctor_snapshot(self, force: bool = True) -> dict:
+        model_health = self.agent.models.runtime_status(force=force)
+        llama = self.agent.models.llama_server_status()
+        models = [model.__dict__ for model in self.agent.models.scan()]
+        active_model = self.agent.config.model.active_model
+        active_found = any(model["name"] == active_model for model in models) if active_model else False
+        loadable_count = sum(1 for model in models if model.get("loadable"))
+        telegram_worker = self.telegram_worker_status()
+        tools = self.agent.tools.list_metadata()
+        issues: list[dict] = []
+        actions: dict[str, dict] = {}
+
+        def add_action(key: str, label: str, detail: str, risk: str = "safe") -> None:
+            actions.setdefault(key, {"key": key, "label": label, "detail": detail, "risk": risk})
+
+        def add_issue(severity: str, area: str, title: str, detail: str, action_keys: list[str] | None = None) -> None:
+            issues.append({"severity": severity, "area": area, "title": title, "detail": detail, "actions": action_keys or []})
+            for key in action_keys or []:
+                if key == "auto":
+                    add_action("auto", "Auto Repair", "Run safe model and Telegram repair steps in order.")
+                elif key == "model":
+                    add_action("model", "Repair Local Model", "Wait for llama.cpp readiness, then restart the model server if still stuck.")
+                elif key == "llama_detect":
+                    add_action("llama_detect", "Use Detected llama-server", "Save the detected llama-server path into settings.")
+                elif key == "telegram":
+                    add_action("telegram", "Repair Telegram", "Clear webhook conflicts and restart polling when Telegram is configured.")
+                elif key == "telegram_clear":
+                    add_action("telegram_clear", "Clear Telegram Webhook", "Remove webhook mode so polling can receive messages.")
+                elif key == "telegram_drop_pending":
+                    add_action("telegram_drop_pending", "Drop Pending Telegram Updates", "Advance offset past old messages to stop repeats.", "read")
+
+        if not active_model:
+            add_issue("error", "model", "No active model selected", "Choose or download a .gguf model before chat can use the local voice engine.", ["auto"])
+        elif not active_found:
+            add_issue("error", "model", "Active model file is missing", f"Configured model `{active_model}` is not in the models folder.", ["auto"])
+        elif not model_health.get("ok"):
+            error = model_health.get("chat_check", {}).get("error") or model_health.get("error") or model_health.get("state") or "model is not ready"
+            if _model_loading_error(error):
+                add_issue("warn", "model", "Model is still loading", "llama.cpp is reachable but not ready for chat yet. Wait first; restart only if it stays stuck.", ["model", "auto"])
+            elif model_health.get("context_mismatch"):
+                add_issue("warn", "model", "Context mismatch", model_health.get("context_warning", "Restart llama.cpp so the saved context applies."), ["model", "auto"])
+            elif model_health.get("endpoint_ok"):
+                add_issue("error", "model", "Model endpoint is up but chat failed", str(error), ["model", "auto"])
+            else:
+                add_issue("error", "model", "Model server is offline", str(error), ["model", "auto"])
+        if not llama.get("available"):
+            add_issue("error", "llama", "llama-server not detected", "Set the llama-server path or build llama.cpp in Termux home.", ["llama_detect"])
+        elif self.agent.config.model.llama_server_path in {"", "auto"}:
+            add_issue("info", "llama", "llama-server detected but not pinned", f"Detected `{llama.get('resolved')}`. Save it to avoid path drift.", ["llama_detect"])
+        if self.agent.config.telegram.enabled and self.agent.config.telegram.token:
+            last_error = str(telegram_worker.get("last_error") or "")
+            if not telegram_worker.get("running"):
+                add_issue("warn", "telegram", "Telegram polling is stopped", last_error or "Start polling so the bot can receive messages.", ["telegram", "auto"])
+            elif last_error:
+                keys = ["telegram", "auto"]
+                if "webhook" in last_error.lower() or "conflict" in last_error.lower():
+                    keys.append("telegram_clear")
+                add_issue("warn", "telegram", "Telegram worker has an error", last_error, keys)
+            if telegram_worker.get("processed", 0) == 0 and telegram_worker.get("offset", 0):
+                add_issue("info", "telegram", "Telegram offset has old state", "Drop pending updates if old messages keep repeating.", ["telegram_drop_pending"])
+        else:
+            add_issue("info", "telegram", "Telegram is not configured", "Paste a BotFather token and enable Telegram before polling.", [])
+
+        if not issues:
+            add_action("model", "Repair Local Model", "Run a model readiness check and restart only if needed.")
+            add_action("telegram", "Repair Telegram", "Restart Telegram polling when configured.")
+
+        summary = "No blocking issues detected." if not issues else f"{len(issues)} issue(s) detected. Start with Auto Repair for safe fixes."
+        return {
+            "ok": True,
+            "generated_at": time.time(),
+            "summary": summary,
+            "issues": issues,
+            "actions": list(actions.values()),
+            "checks": {
+                "model": model_health,
+                "llama_server": llama,
+                "models": {"active": active_model, "active_found": active_found, "count": len(models), "loadable_count": loadable_count},
+                "telegram_worker": telegram_worker,
+                "tools": {
+                    "total": len(tools),
+                    "enabled": sum(1 for tool in tools if tool.get("enabled")),
+                    "available": sum(1 for tool in tools if tool.get("enabled") and tool.get("available")),
+                },
+                "llama_log": self.agent.models.server_log_tail(20),
+            },
+        }
+
+    def repair(self, action: str = "auto") -> dict:
+        action = (action or "auto").strip().lower()
+        if action not in {"auto", "model", "llama_detect", "telegram", "telegram_clear", "telegram_drop_pending"}:
+            return {"ok": False, "error": f"unknown repair action: {action}"}
+        steps: list[dict] = []
+
+        def add_step(name: str, result: dict) -> dict:
+            steps.append({"name": name, "ok": bool(result.get("ok")), "result": result})
+            return result
+
+        if action in {"auto", "llama_detect"}:
+            resolved = self.agent.models.resolve_llama_server()
+            if resolved:
+                self.agent.config.model.llama_server_path = resolved
+                save_config(self.agent.config)
+                add_step("llama_detect", {"ok": True, "llama_server_path": resolved})
+            elif action == "llama_detect":
+                add_step("llama_detect", {"ok": False, "error": "llama-server was not detected."})
+
+        if action in {"auto", "model"}:
+            add_step("model", self.repair_model_server())
+
+        if action in {"auto", "telegram"}:
+            add_step("telegram", self.repair_telegram())
+        elif action == "telegram_clear":
+            try:
+                add_step("telegram_clear", TelegramBot(self.agent).delete_webhook(drop_pending_updates=False))
+            except Exception as exc:
+                add_step("telegram_clear", {"ok": False, "error": str(exc)})
+        elif action == "telegram_drop_pending":
+            try:
+                add_step("telegram_drop_pending", TelegramBot(self.agent).reset_offset(drop_pending_updates=True))
+            except Exception as exc:
+                add_step("telegram_drop_pending", {"ok": False, "error": str(exc)})
+
+        hard_failures = [step for step in steps if not step.get("ok") and not _repair_step_skippable(step)]
+        return {
+            "ok": not hard_failures,
+            "action": action,
+            "steps": steps,
+            "summary": "Repair finished." if not hard_failures else "Repair finished with issues.",
+            "diagnostics": self.doctor_snapshot(force=True),
+        }
+
+    def repair_model_server(self) -> dict:
+        before = self.agent.models.runtime_status(force=True)
+        if before.get("ok"):
+            return {"ok": True, "message": "Local model is already ready.", "health": before}
+        if self.agent.models.active_path() is None:
+            models = [model for model in self.agent.models.scan() if model.loadable]
+            if not models:
+                return {"ok": False, "error": "No .gguf model is available. Download or copy a model into the models folder.", "health": before}
+            selected = self.agent.models.switch(models[0].name)
+            if not selected.get("ok"):
+                return {"ok": False, "error": selected.get("error", "could not select a model"), "health": before}
+        error = before.get("chat_check", {}).get("error") or before.get("error") or ""
+        if _model_loading_error(error):
+            for _ in range(3):
+                time.sleep(2)
+                waited = self.agent.models.runtime_status(force=True)
+                if waited.get("ok"):
+                    return {"ok": True, "message": "Local model finished loading.", "health": waited, "waited": True}
+        restart = self.agent.models.restart_server()
+        return {
+            "ok": bool(restart.get("ok")),
+            "message": "Model restart requested." if restart.get("ok") else "Model restart did not reach ready state.",
+            "health": restart,
+        }
+
+    def repair_telegram(self) -> dict:
+        cfg = self.agent.config.telegram
+        if not cfg.enabled or not cfg.token:
+            return {"ok": True, "skipped": True, "message": "Telegram is disabled or missing a token."}
+        try:
+            bot = TelegramBot(self.agent)
+            clear = bot.delete_webhook(drop_pending_updates=False)
+            if not clear.get("ok") and clear.get("offline"):
+                return {"ok": True, "skipped": True, "message": clear.get("error", "Telegram is offline."), "webhook": clear}
+            if not clear.get("ok"):
+                return {"ok": False, "error": clear.get("error", "webhook clear failed"), "webhook": clear}
+            started = self.start_telegram()
+            return {"ok": bool(started.get("ok")), "webhook": clear, "start": started, "error": started.get("error", "")}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
     def _dashboard_workers(self, agent_status: dict, capabilities: list[dict], tools: list[dict], active_downloads: list[dict]) -> list[dict]:
         caps = {cap["name"]: cap for cap in capabilities}
         tool_map = {tool["name"]: tool for tool in tools}
@@ -351,6 +524,9 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._send_file(STATIC_DIR / path.removeprefix("/static/"))
         elif path == "/api/dashboard":
             self._json(self.server_state.dashboard_snapshot())
+        elif path == "/api/doctor":
+            force = query.get("force", ["1"])[0].lower() in {"1", "true", "yes"}
+            self._json(self.server_state.doctor_snapshot(force=force))
         elif path == "/api/status":
             self._json(self._status())
         elif path == "/api/proactive":
@@ -493,6 +669,8 @@ class NermanaHandler(BaseHTTPRequestHandler):
             if result.get("ok"):
                 save_config(self.agent.config)
             self._json(result)
+        elif path == "/api/doctor/repair":
+            self._json(self.server_state.repair(str(body.get("action", "auto"))))
         elif path == "/api/files/upload":
             self._json(self._upload_file(body))
         elif path.startswith("/api/tools/") and path.endswith("/enabled"):
@@ -705,6 +883,16 @@ def _query_int(query: dict[str, list[str]], key: str, default: int, minimum: int
     except (TypeError, ValueError):
         value = default
     return max(minimum, min(maximum, value))
+
+
+def _model_loading_error(message: str) -> bool:
+    lower = str(message or "").lower()
+    return "loading model" in lower or ("503" in lower and "service unavailable" in lower)
+
+
+def _repair_step_skippable(step: dict) -> bool:
+    result = step.get("result") or {}
+    return bool(result.get("skipped"))
 
 
 def _unique_upload_path(folder: Path, filename: str) -> Path:
