@@ -46,8 +46,8 @@ class ModelConfig:
     llama_server_path: str = "auto"
     base_url: str = "http://127.0.0.1:8080/v1"
     context_size: int = 4096
-    temperature: float = 0.7
-    top_p: float = 0.8
+    temperature: float = 0.35
+    top_p: float = 0.7
     threads: int = 0
     batch_size: int = 512
     ubatch_size: int = 128

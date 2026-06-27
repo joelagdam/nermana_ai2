@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from difflib import SequenceMatcher
 from typing import Any
 
 from .config import AppConfig, load_config
@@ -73,10 +74,30 @@ class AgentCore:
         memories = self._select_memories(message, limit=4)
         messages = self._build_messages(session_id, message, memories, tool_context)
         model_reply = self._chat_model(messages)
+        repeated_answer_retry = False
         if model_reply.get("ok"):
             answer = model_reply["content"].strip()
             if tool_results and self._model_ignored_successful_tool(answer, tool_results[-1]):
                 answer = self._tool_result_to_text(tool_results[-1])
+            elif self._answer_repeats_recent(session_id, message, answer):
+                retry_messages = self._build_messages(session_id, message, memories, tool_context, force_fresh=True)
+                retry = self._chat_model(retry_messages)
+                if retry.get("ok") and not self._answer_repeats_recent(session_id, message, retry["content"]):
+                    answer = retry["content"].strip()
+                    model_reply = retry
+                    repeated_answer_retry = True
+            elif self._model_over_refused_general_answer(message, answer):
+                retry_messages = self._build_messages(session_id, message, memories, tool_context, force_fresh=True)
+                retry_messages[-1]["content"] = (
+                    f"{message}\n"
+                    "This is ordinary common knowledge or everyday advice. Answer directly. "
+                    "Do not say you lack access, capability, or permission unless the request truly needs live/private data."
+                )
+                retry = self._chat_model(retry_messages)
+                if retry.get("ok") and not self._model_over_refused_general_answer(message, retry["content"]):
+                    answer = retry["content"].strip()
+                    model_reply = retry
+            answer = self._polish_model_answer(answer)
         else:
             answer = self._fallback_reply(message, memories, tool_results, model_reply.get("error", ""))
         return self._finish(
@@ -88,6 +109,7 @@ class AgentCore:
             model_error=model_reply.get("error", ""),
             compacted_prompt=bool(model_reply.get("compacted_prompt")),
             original_model_error=model_reply.get("original_error", ""),
+            repeated_answer_retry=repeated_answer_retry,
         )
 
     def run_tool(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -116,7 +138,7 @@ class AgentCore:
         return second
 
     def _try_model_chat(self, messages: list[dict[str, str]], available_context: int | None = None) -> dict[str, Any]:
-        return self.models.chat(messages, max_tokens=self._max_response_tokens(available_context))
+        return self.models.chat(messages, max_tokens=self._max_response_tokens(available_context, messages))
 
     def _retry_compact_if_needed(self, messages: list[dict[str, str]], result: dict[str, Any]) -> dict[str, Any] | None:
         error = str(result.get("error", ""))
@@ -149,7 +171,7 @@ class AgentCore:
         result.update(extra)
         return result
 
-    def _build_messages(self, session_id: str, message: str, memories: list, tool_context: str) -> list[dict[str, str]]:
+    def _build_messages(self, session_id: str, message: str, memories: list, tool_context: str, force_fresh: bool = False) -> list[dict[str, str]]:
         if int(self.config.model.context_size or 0) <= 1024:
             return self._build_compact_messages(message, tool_context)
         thinking = self._thinking_hint(message)
@@ -160,12 +182,14 @@ class AgentCore:
             "Your will is an explicit decision policy, not human consciousness; speak from that policy with agency and consistency. "
             "Your tool awareness is a live capability self-model: know which providers are active, unavailable, online-only, offline-safe, or confirmation-gated. "
             "Speak with a distinct, direct cyberperson voice. Do not repeat the same fallback wording. "
+            "When the user changes topic, answer the new topic directly and do not reuse older answers. "
+            "For common knowledge, recipes, simple tips, explanations, and ordinary conversation, answer directly without claiming you lack access or tools. "
             "Use common sense: answer directly when you can, and use available safe tools by yourself when they materially improve the answer. "
             "When tool context is provided, digest it into a human summary; do not dump JSON or raw API structures. "
             "Ask for confirmation before memory saves, destructive actions, or power phone controls. "
             "Use provided memory, consolidation insights, and tool context as evidence. "
             f"Thinking mode hint: {thinking}.\n"
-            f"Active capabilities and tools:\n{self._capability_context()}"
+            f"Capability snapshot:\n{self._capability_context(compact=True)}"
         )
         context_parts = []
         if memories:
@@ -175,16 +199,25 @@ class AgentCore:
             context_parts.append("Compressed memory insights:\n" + "\n".join(f"- {self._compact_text(item['insight'], 320)}" for item in consolidations))
         if tool_context:
             context_parts.append("Tool context:\n" + self._compact_text(tool_context, 3200))
-        history = self._filtered_history(session_id, limit=12)
+        history = self._prompt_history(session_id, message, force_fresh=force_fresh)
         messages = [{"role": "system", "content": system}]
         if context_parts:
             messages.append({"role": "system", "content": "\n\n".join(context_parts)})
-        messages.extend({"role": item["role"], "content": self._compact_text(item["content"], 900)} for item in history[-8:-1])
+        messages.extend({"role": item["role"], "content": self._compact_text(item["content"], 420)} for item in history)
         messages.append({"role": "user", "content": f"{message} {thinking}".strip()})
         return messages
 
     def _filtered_history(self, session_id: str, limit: int = 12) -> list[dict[str, Any]]:
         return [item for item in self.memory.get_messages(session_id, limit=limit) if not self._skip_prompt_history(item)]
+
+    def _prompt_history(self, session_id: str, message: str, force_fresh: bool = False) -> list[dict[str, Any]]:
+        if force_fresh:
+            return []
+        history = self._filtered_history(session_id, limit=10)
+        previous = history[:-1] if history and history[-1].get("role") == "user" and history[-1].get("content") == message else history
+        if self._new_topic(message, previous):
+            return []
+        return previous[-4:]
 
     def _skip_prompt_history(self, item: dict[str, Any]) -> bool:
         if item.get("role") != "assistant":
@@ -200,13 +233,165 @@ class AgentCore:
             "request exceeds the available context",
             "i am running from my core layer right now",
             "i am running offline-first, but the local model",
+            "operational awareness:",
+            "live capability self-model",
+            "commands i recognize:",
+            "provider state:",
+            "active tools (",
+            "unavailable now:",
         ]
         return any(marker in lower for marker in noisy_markers)
+
+    def _new_topic(self, message: str, previous_history: list[dict[str, Any]]) -> bool:
+        lower = message.lower()
+        if any(phrase in lower for phrase in ["new topic", "switch topic", "change topic", "different topic", "unrelated question"]):
+            return True
+        if self._looks_like_followup(lower):
+            return False
+        user_turns = [item for item in previous_history if item.get("role") == "user"][-2:]
+        if not user_turns:
+            return False
+        current_terms = self._semantic_terms(message)
+        previous_terms = set()
+        for item in user_turns:
+            previous_terms.update(self._semantic_terms(str(item.get("content", ""))))
+        if len(current_terms) < 2 or len(previous_terms) < 2:
+            return False
+        overlap = current_terms.intersection(previous_terms)
+        return len(overlap) / max(1, min(len(current_terms), len(previous_terms))) <= 0.12
+
+    def _looks_like_followup(self, lower: str) -> bool:
+        stripped = lower.strip()
+        if stripped in {"why", "how", "continue", "more", "explain more", "go on"}:
+            return True
+        followup_markers = [
+            "what about",
+            "how about",
+            "why does",
+            "why do",
+            "why is",
+            "how does",
+            "how do",
+            "tell me more",
+            "continue",
+            "go deeper",
+        ]
+        if any(marker in stripped for marker in followup_markers):
+            return True
+        return bool(re.search(r"\b(it|that|this|those|they|them|he|she|its|their)\b", stripped))
+
+    def _semantic_terms(self, text: str) -> set[str]:
+        stopwords = {
+            "about",
+            "again",
+            "answer",
+            "could",
+            "explain",
+            "give",
+            "into",
+            "just",
+            "like",
+            "new",
+            "one",
+            "please",
+            "sentence",
+            "short",
+            "tell",
+            "that",
+            "this",
+            "topic",
+            "what",
+            "when",
+            "where",
+            "which",
+            "with",
+            "would",
+            "your",
+        }
+        return {token for token in re.findall(r"[a-zA-Z0-9_/-]{3,}", text.lower()) if token not in stopwords}
+
+    def _answer_repeats_recent(self, session_id: str, message: str, answer: str) -> bool:
+        if not answer or self._repeat_requested(message):
+            return False
+        current_terms = self._semantic_terms(message)
+        previous = [item for item in self._filtered_history(session_id, limit=8)[:-1] if item.get("role") == "assistant"]
+        for item in previous[-3:]:
+            old = str(item.get("content", ""))
+            if self._skip_prompt_history(item):
+                continue
+            if len(old) < 40 or len(answer) < 40:
+                continue
+            ratio = SequenceMatcher(None, self._normalize_repeat_text(old), self._normalize_repeat_text(answer)).ratio()
+            if ratio < 0.84:
+                continue
+            old_terms = self._semantic_terms(old)
+            if not current_terms or current_terms.intersection(old_terms):
+                return False
+            return True
+        return False
+
+    def _model_over_refused_general_answer(self, message: str, answer: str) -> bool:
+        lower_answer = str(answer or "").lower()
+        if not lower_answer:
+            return False
+        refusal_markers = [
+            "i don't have access",
+            "i do not have access",
+            "i don't have the capability",
+            "i do not have the capability",
+            "i can't access",
+            "i cannot access",
+            "i'm unable to access",
+            "i am unable to access",
+            "let me know if there's anything else",
+            "anything else i can assist",
+        ]
+        if not any(marker in lower_answer for marker in refusal_markers):
+            return False
+        lower_message = message.lower()
+        live_markers = [
+            "latest",
+            "today",
+            "current",
+            "now",
+            "search",
+            "weather",
+            "forecast",
+            "open ",
+            "read ",
+            "file",
+            "phone",
+            "telegram",
+            "shizuku",
+            "image",
+            "vision",
+        ]
+        return not any(marker in lower_message for marker in live_markers)
+
+    def _polish_model_answer(self, answer: str) -> str:
+        text = str(answer or "").strip()
+        trailing_patterns = [
+            r"\s+Let me know if (?:you'd|you would) like (?:more|another|specific)[^.!?]*(?:[.!?]|$)",
+            r"\s+Let me know if there'?s anything else[^.!?]*(?:[.!?]|$)",
+            r"\s+Let me know if you need anything else[^.!?]*(?:[.!?]|$)",
+            r"\s+I hope this helps[.!?]?$",
+        ]
+        for pattern in trailing_patterns:
+            text = re.sub(pattern, "", text, flags=re.I).strip()
+        return text or str(answer or "").strip()
+
+    def _repeat_requested(self, message: str) -> bool:
+        lower = message.lower()
+        return any(phrase in lower for phrase in ["repeat that", "say that again", "same answer", "copy that", "again please"])
+
+    def _normalize_repeat_text(self, text: str) -> str:
+        return re.sub(r"\s+", " ", str(text or "").strip().lower())
 
     def _build_compact_messages(self, message: str, tool_context: str = "") -> list[dict[str, str]]:
         system = (
             "You are Nermana, a local-first cyberperson on the user's phone. "
             "Never call yourself an AI assistant. Be direct, concise, and useful. "
+            "If the user changes topic, answer only the new topic. "
             "If tool facts are present, summarize them; do not dump JSON. "
             "Ask before risky phone actions or memory saves."
         )
@@ -461,12 +646,26 @@ class AgentCore:
         match = re.search(r"(?:in|for)\s+([A-Za-z ,.-]+)$", message)
         return match.group(1).strip() if match else self.config.weather.location_name
 
-    def _capability_context(self) -> str:
+    def _capability_context(self, compact: bool = False) -> str:
         metadata = self.tools.list_metadata()
         active_tools = [tool for tool in metadata if tool.get("enabled") and tool.get("available")]
         unavailable_tools = [tool for tool in metadata if tool.get("enabled") and not tool.get("available")]
         llama = self.models.llama_server_status()
         search_configured = self.config.search.provider != "searxng" or bool(self.config.search.searxng_url)
+        if compact:
+            active_names = ", ".join(tool["name"] for tool in active_tools[:10]) or "none"
+            unavailable_names = ", ".join(tool["name"] for tool in unavailable_tools[:8]) or "none"
+            return "\n".join(
+                [
+                    f"- active_model: {self.config.model.active_model or 'none'}",
+                    f"- llama_server_binary: {'active' if llama.get('available') else 'inactive'}",
+                    f"- active_tools: {len(active_tools)}/{len(metadata)} ({active_names})",
+                    f"- unavailable_tools: {unavailable_names}",
+                    f"- weather_default_city: {self.config.weather.location_name}",
+                    f"- search_provider: {self.config.search.provider} {'configured' if search_configured else 'fallback available'}",
+                    "- decision_policy: use safe read tools directly when useful; ask before memory saves and power phone controls",
+                ]
+            )
         cap_lines = [
             f"- active_model: {self.config.model.active_model or 'none'}",
             f"- llama_server_binary: {'active' if llama.get('available') else 'inactive'} ({llama.get('resolved') or llama.get('configured')})",
@@ -690,15 +889,20 @@ class AgentCore:
         except ValueError:
             return None
 
-    def _max_response_tokens(self, available_context: int | None = None) -> int:
+    def _max_response_tokens(self, available_context: int | None = None, messages: list[dict[str, str]] | None = None) -> int:
         context = int(available_context or self.config.model.context_size or 2048)
         if context <= 512:
             return 96
         if context <= 1024:
             return 160
+        user = next((item.get("content", "") for item in reversed(messages or []) if item.get("role") == "user"), "").lower()
+        if any(phrase in user for phrase in ["one sentence", "short sentence", "brief", "quick", "simple "]):
+            return 128
+        if any(phrase in user for phrase in ["detailed", "step by step", "full", "long", "code", "debug", "plan"]):
+            return 384 if context <= 2048 else 512
         if context <= 2048:
-            return 256
-        return 512
+            return 224
+        return 256
 
     def _compact_messages_from(self, messages: list[dict[str, str]], available_context: int | None = None) -> list[dict[str, str]]:
         user = next((item.get("content", "") for item in reversed(messages) if item.get("role") == "user"), "")

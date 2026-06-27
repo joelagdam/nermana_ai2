@@ -552,6 +552,117 @@ class AgentTests(unittest.TestCase):
             self.assertNotIn("larger voice engine stumbles", prompt_text)
             self.assertNotIn("GGUF model back online", prompt_text)
 
+    def test_agent_filters_capability_report_from_prompt_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")), model=ModelConfig(context_size=4096))
+            agent = AgentCore(cfg)
+            agent.memory.add_message("web", "user", "are you conscious of tools?")
+            agent.memory.add_message(
+                "web",
+                "assistant",
+                "Operational awareness: I do not have human consciousness; I keep a live capability self-model.\nCommands I recognize: /tools.",
+            )
+            captured = []
+
+            def fake_chat(messages, max_tokens=512):
+                captured.append(messages)
+                return {"ok": True, "content": "Basketball is a court sport."}
+
+            with patch.object(agent.models, "chat", side_effect=fake_chat):
+                result = agent.chat("New topic: what is basketball?", session_id="web")
+            prompt_text = str(captured[0])
+            self.assertEqual(result["reply"], "Basketball is a court sport.")
+            self.assertNotIn("Operational awareness", prompt_text)
+            self.assertNotIn("Commands I recognize", prompt_text)
+
+    def test_agent_explicit_new_topic_drops_stale_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")), model=ModelConfig(context_size=4096))
+            agent = AgentCore(cfg)
+            agent.memory.add_message("topic", "user", "Tell me about volcanoes.")
+            agent.memory.add_message("topic", "assistant", "Volcanoes involve magma and eruptions.")
+            captured = []
+
+            def fake_chat(messages, max_tokens=512):
+                captured.append(messages)
+                return {"ok": True, "content": "Photosynthesis feeds plants."}
+
+            with patch.object(agent.models, "chat", side_effect=fake_chat):
+                agent.chat("New topic: explain photosynthesis.", session_id="topic")
+            prompt_text = str(captured[0])
+            self.assertNotIn("Volcanoes involve magma", prompt_text)
+            self.assertIn("explain photosynthesis", prompt_text)
+
+    def test_agent_unrelated_topic_shift_drops_stale_history_but_followup_keeps_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")), model=ModelConfig(context_size=4096))
+            agent = AgentCore(cfg)
+            agent.memory.add_message("shift", "user", "Tell me about volcano magma eruptions.")
+            agent.memory.add_message("shift", "assistant", "Volcanoes erupt when pressure moves magma upward.")
+            captured = []
+
+            def fake_chat(messages, max_tokens=512):
+                captured.append(messages)
+                return {"ok": True, "content": "ok"}
+
+            with patch.object(agent.models, "chat", side_effect=fake_chat):
+                agent.chat("Explain photosynthesis in plants.", session_id="shift")
+            self.assertNotIn("Volcanoes erupt", str(captured[-1]))
+
+            agent.memory.add_message("follow", "user", "Tell me about volcano magma eruptions.")
+            agent.memory.add_message("follow", "assistant", "Volcanoes erupt when pressure moves magma upward.")
+            with patch.object(agent.models, "chat", side_effect=fake_chat):
+                agent.chat("Why do they erupt?", session_id="follow")
+            self.assertIn("Volcanoes erupt", str(captured[-1]))
+
+    def test_agent_retries_fresh_when_model_repeats_old_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")), model=ModelConfig(context_size=4096))
+            agent = AgentCore(cfg)
+            old = "Volcanoes are openings in Earth's crust where magma, ash, and gas can escape during eruptions."
+            agent.memory.add_message("repeat", "user", "What is a volcano?")
+            agent.memory.add_message("repeat", "assistant", old)
+            responses = [
+                {"ok": True, "content": old},
+                {"ok": True, "content": "Photosynthesis is how plants turn light, water, and carbon dioxide into food."},
+            ]
+
+            with patch.object(agent.models, "chat", side_effect=responses) as chat:
+                result = agent.chat("Explain photosynthesis in one sentence.", session_id="repeat")
+            self.assertEqual(result["reply"], "Photosynthesis is how plants turn light, water, and carbon dioxide into food.")
+            self.assertTrue(result["repeated_answer_retry"])
+            self.assertEqual(chat.call_count, 2)
+
+    def test_agent_retries_common_knowledge_over_refusal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")), model=ModelConfig(context_size=4096))
+            agent = AgentCore(cfg)
+            responses = [
+                {"ok": True, "content": "I don't have access to sleep-related tips. Let me know if there's anything else I can assist you with!"},
+                {"ok": True, "content": "Keep a consistent sleep schedule, including weekends."},
+            ]
+
+            with patch.object(agent.models, "chat", side_effect=responses) as chat:
+                result = agent.chat("Give one useful tip for sleep.", session_id="over-refusal")
+            self.assertEqual(result["reply"], "Keep a consistent sleep schedule, including weekends.")
+            self.assertEqual(chat.call_count, 2)
+
+    def test_agent_uses_smaller_token_budget_for_short_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")), model=ModelConfig(context_size=4096))
+            agent = AgentCore(cfg)
+            short_messages = [{"role": "user", "content": "In one short sentence, what is a volcano?"}]
+            long_messages = [{"role": "user", "content": "Give a detailed step by step plan."}]
+            self.assertEqual(agent._max_response_tokens(messages=short_messages), 128)
+            self.assertEqual(agent._max_response_tokens(messages=long_messages), 512)
+
+    def test_agent_polishes_generic_assistant_closers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")), model=ModelConfig(context_size=4096))
+            agent = AgentCore(cfg)
+            answer = "A simple egg breakfast is scrambled eggs with toast. Let me know if you'd like more ideas!"
+            self.assertEqual(agent._polish_model_answer(answer), "A simple egg breakfast is scrambled eggs with toast.")
+
     def test_agent_reports_capability_self_model_without_llm(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
