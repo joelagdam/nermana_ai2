@@ -42,6 +42,15 @@ class AgentCore:
                 answer = self._tool_result_to_text(pending_result)
             return self._finish(session_id, message, answer, [pending_result])
 
+        implicit_confirmation = self._maybe_infer_confirmed_tool(message, session_id)
+        if implicit_confirmation:
+            tool_result = self.tools.run(implicit_confirmation["tool"], implicit_confirmation["payload"])
+            if tool_result.get("ok") and tool_result.get("tool") and tool_result.get("tool") != "memory":
+                answer = self._answer_from_tool_context(session_id, "Answer the user's confirmed tool request.", tool_result)
+            else:
+                answer = self._tool_result_to_text(tool_result)
+            return self._finish(session_id, message, answer, [tool_result], inferred_tool=implicit_confirmation)
+
         if self._should_report_capabilities(message):
             answer = self._capability_self_report(message)
             return self._finish(session_id, message, answer, core_answer=True)
@@ -164,7 +173,10 @@ class AgentCore:
         messages = self._build_messages(session_id, instruction, memories, tool_context)
         model_reply = self._chat_model(messages)
         if model_reply.get("ok"):
-            return model_reply["content"].strip()
+            answer = model_reply["content"].strip()
+            if self._model_ignored_successful_tool(answer, tool_result):
+                return tool_context
+            return answer
         return tool_context
 
     def _finish(self, session_id: str, message: str, answer: str, tool_results: list[dict[str, Any]] | None = None, **extra: Any) -> dict[str, Any]:
@@ -688,6 +700,64 @@ class AgentCore:
             memory_id = self.memory.remember(pending["payload"]["content"], tags="conversation,user", source="confirmed-chat")
             return {"ok": True, "content": f"Saved to memory as #{memory_id}."}
         return self.tools.run(pending["tool"], pending["payload"])
+
+    def _maybe_infer_confirmed_tool(self, message: str, session_id: str) -> dict[str, Any] | None:
+        if not self._is_confirmation_reply(message):
+            return None
+        previous = self._previous_assistant_message(session_id)
+        if not previous:
+            return None
+        lower = previous.lower()
+        if any(word in lower for word in ["weather", "forecast", "open-meteo", "latitude", "longitude", "coordinates"]):
+            return {
+                "tool": "current_weather",
+                "payload": {"location": self._extract_weather_location_from_text(previous)},
+                "reason": "confirmed weather lookup from previous reply",
+            }
+        if any(phrase in lower for phrase in ["search for", "look up", "search online", "find online"]):
+            return {
+                "tool": "web_search",
+                "payload": {"query": self._extract_search_query_from_text(previous)},
+                "reason": "confirmed search from previous reply",
+            }
+        return None
+
+    def _is_confirmation_reply(self, message: str) -> bool:
+        lowered = re.sub(r"[.!?]+$", "", message.lower().strip())
+        return lowered in {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "go", "go ahead", "do it", "please do", "run it"}
+
+    def _previous_assistant_message(self, session_id: str) -> str:
+        try:
+            messages = self.memory.get_messages(session_id, limit=8)
+        except Exception:
+            return ""
+        for item in reversed(messages[:-1]):
+            if item.get("role") == "assistant":
+                return str(item.get("content") or "")
+        return ""
+
+    def _extract_weather_location_from_text(self, text: str) -> str:
+        clean = " ".join(str(text or "").replace("\n", " ").split())
+        patterns = [
+            r"weather\s+(?:in|for)\s+([A-Za-z ,.-]+?)(?:\s+using|\?|[.;]|$)",
+            r"forecast\s+(?:in|for)\s+([A-Za-z ,.-]+?)(?:\s+using|\?|[.;]|$)",
+            r"(?:latitude|longitude|coordinates)\s+(?:for|of)\s+([A-Za-z ,.-]+?)(?:\s+using|\?|[.;]|$)",
+            r"(?:in|for)\s+([A-Za-z ,.-]+?)\s+using\s+(?:the\s+)?Open-Meteo",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, clean, re.I)
+            if match:
+                location = self._clean_location(match.group(1))
+                if location:
+                    return location
+        return self.config.weather.location_name
+
+    def _extract_search_query_from_text(self, text: str) -> str:
+        clean = " ".join(str(text or "").replace("\n", " ").split())
+        match = re.search(r"(?:search for|look up|find online)\s+(.+?)(?:\?|[.;]|$)", clean, re.I)
+        if match:
+            return match.group(1).strip(" .")
+        return self._compact_text(clean, 180)
 
     def _should_search(self, message: str) -> bool:
         lower = message.lower()

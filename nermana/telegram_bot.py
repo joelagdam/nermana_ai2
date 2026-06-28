@@ -17,6 +17,8 @@ class TelegramBot:
         self.offset_path = resolve_path(self.config.offset_path)
         self.offset = self._load_offset()
         self.allowed_user_ids = {int(user_id) for user_id in self.config.allowed_user_ids if str(user_id).strip().isdigit()}
+        self._busy_lock = threading.Lock()
+        self._busy_chats: dict[int, threading.Thread] = {}
 
     def run_forever(self) -> None:
         if not self.config.enabled or not self.config.token:
@@ -133,15 +135,25 @@ class TelegramBot:
                     errors.append(sent.get("error", "send failed"))
                 processed += 1
                 continue
+            session_id = f"telegram-{chat_id}"
+            if self._chat_busy(int(chat_id)):
+                sent = self._send(chat_id, self._busy_wait_text())
+                if not sent.get("ok"):
+                    errors.append(sent.get("error", "send failed"))
+                processed += 1
+                continue
+            if self._should_send_tool_wait(text, session_id):
+                waiting = self._send(chat_id, self._tool_wait_text(text, session_id))
+                if not waiting.get("ok"):
+                    errors.append(waiting.get("error", "send failed"))
+                self._start_chat_worker(int(chat_id), session_id, text)
+                processed += 1
+                continue
             stop_typing = threading.Event()
             typing_thread = threading.Thread(target=self._typing_loop, args=(chat_id, stop_typing), daemon=True)
             typing_thread.start()
-            if self._should_send_tool_wait(text):
-                waiting = self._send(chat_id, self._tool_wait_text(text))
-                if not waiting.get("ok"):
-                    errors.append(waiting.get("error", "send failed"))
             try:
-                chat_result = self.agent.chat(text, session_id=f"telegram-{chat_id}")
+                chat_result = self.agent.chat(text, session_id=session_id)
             except Exception as exc:
                 chat_result = {"ok": False, "error": str(exc)}
             finally:
@@ -154,6 +166,51 @@ class TelegramBot:
             processed += 1
         self._save_offset()
         return {"ok": not errors, "processed": processed, "errors": errors, "offset": self.offset}
+
+    def _start_chat_worker(self, chat_id: int, session_id: str, text: str) -> None:
+        thread = threading.Thread(target=self._run_chat_worker, args=(chat_id, session_id, text), daemon=True)
+        with self._busy_lock:
+            self._busy_chats[chat_id] = thread
+        thread.start()
+
+    def _run_chat_worker(self, chat_id: int, session_id: str, text: str) -> None:
+        stop_typing = threading.Event()
+        typing_thread = threading.Thread(target=self._typing_loop, args=(chat_id, stop_typing), daemon=True)
+        typing_thread.start()
+        try:
+            try:
+                chat_result = self.agent.chat(text, session_id=session_id)
+            except Exception as exc:
+                chat_result = {"ok": False, "error": str(exc)}
+            for reply in self._reply_batches(chat_result):
+                sent = self._send(chat_id, reply)
+                if not sent.get("ok"):
+                    print(f"telegram: {sent.get('error', 'send failed')}")
+                    break
+        finally:
+            stop_typing.set()
+            with self._busy_lock:
+                current = self._busy_chats.get(chat_id)
+                if current is threading.current_thread():
+                    self._busy_chats.pop(chat_id, None)
+
+    def _chat_busy(self, chat_id: int) -> bool:
+        with self._busy_lock:
+            thread = self._busy_chats.get(chat_id)
+            if thread and thread.is_alive():
+                return True
+            self._busy_chats.pop(chat_id, None)
+            return False
+
+    def wait_for_idle(self, timeout: float = 5.0) -> None:
+        deadline = time.time() + timeout
+        while True:
+            with self._busy_lock:
+                threads = [thread for thread in self._busy_chats.values() if thread.is_alive()]
+            if not threads or time.time() >= deadline:
+                return
+            for thread in threads:
+                thread.join(max(0.01, min(0.1, deadline - time.time())))
 
     def reset_offset(self, drop_pending_updates: bool = False) -> dict[str, Any]:
         self.offset = 0
@@ -215,7 +272,7 @@ class TelegramBot:
             compact = compact[:897] + "..."
         return f"quoted from {name}: {compact}"
 
-    def _should_send_tool_wait(self, text: str) -> bool:
+    def _should_send_tool_wait(self, text: str, session_id: str = "") -> bool:
         lower = text.lower()
         markers = [
             "/weather",
@@ -235,15 +292,47 @@ class TelegramBot:
             "coordinates",
             "telegram reply context",
         ]
-        return any(marker in lower for marker in markers)
+        return any(marker in lower for marker in markers) or bool(self._confirmed_tool_target(text, session_id))
 
-    def _tool_wait_text(self, text: str) -> str:
+    def _tool_wait_text(self, text: str, session_id: str = "") -> str:
         lower = text.lower()
-        if "weather" in lower or "forecast" in lower or "latitude" in lower or "longitude" in lower or "coordinates" in lower:
+        target = self._confirmed_tool_target(text, session_id)
+        if target == "current_weather" or "weather" in lower or "forecast" in lower or "latitude" in lower or "longitude" in lower or "coordinates" in lower:
             return "⏳ Checking the weather/location tool. I’ll summarize the result when it returns."
-        if "/search" in lower or "search" in lower or "look up" in lower or "latest" in lower:
+        if target == "web_search" or "/search" in lower or "search" in lower or "look up" in lower or "latest" in lower:
             return "⏳ Searching now. I’ll send the useful summary when the results return."
         return "⏳ Using the needed tool now. I’ll summarize the result when it returns."
+
+    def _busy_wait_text(self) -> str:
+        return "⏳ Still working on the current result. Please wait; I’ll send the summary as soon as it finishes."
+
+    def _confirmed_tool_target(self, text: str, session_id: str) -> str:
+        if not self._is_confirmation_text(text):
+            return ""
+        pending = self.agent.pending_actions.get(session_id)
+        if pending:
+            return str(pending.get("tool") or "")
+        previous = self._previous_assistant_message(session_id).lower()
+        if any(word in previous for word in ["weather", "forecast", "open-meteo", "latitude", "longitude", "coordinates"]):
+            return "current_weather"
+        if any(phrase in previous for phrase in ["search for", "look up", "search online", "find online"]):
+            return "web_search"
+        return ""
+
+    def _is_confirmation_text(self, text: str) -> bool:
+        lowered = " ".join(str(text or "").lower().strip().split())
+        lowered = lowered.rstrip(".!?")
+        return lowered in {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "go", "go ahead", "do it", "please do", "run it"}
+
+    def _previous_assistant_message(self, session_id: str) -> str:
+        try:
+            messages = self.agent.memory.get_messages(session_id, limit=8)
+        except Exception:
+            return ""
+        for item in reversed(messages):
+            if item.get("role") == "assistant":
+                return str(item.get("content") or "")
+        return ""
 
     def _is_start_command(self, text: str) -> bool:
         lowered = text.strip().lower()

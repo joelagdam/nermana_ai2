@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-CORE_KNOWLEDGE_VERSION = "2026-06-28.1"
+CORE_KNOWLEDGE_VERSION = "2026-06-28.2"
 
 
 @dataclass(frozen=True)
@@ -51,6 +51,7 @@ CORE_KNOWLEDGE: tuple[KnowledgeCard, ...] = (
             "Use search for current, latest, price, news, online, or lookup requests. Use file tools only inside allowed folders. "
             "Use phone_status for battery/device checks. Shizuku power tools are gated and should ask first. "
             "When a tool is needed, say that the tool is being checked, run it, then summarize the result as human text. "
+            "If the owner confirms with yes after a tool proposal, treat that yes as permission to run the relevant tool. "
             "Never promise future tool use after the tool result is already available, never dump raw JSON in chat, and be honest when the provider is offline."
         ),
     ),
@@ -95,6 +96,8 @@ CORE_KNOWLEDGE: tuple[KnowledgeCard, ...] = (
             "If messages repeat, drop pending updates or reset offset. If polling conflicts, clear webhook. "
             "If internet is missing, Telegram should show an offline/unreachable status while local web and core chat remain usable. "
             "During a model reply, Telegram sends typing actions until the answer is ready. "
+            "For weather, search, files, phone, image, vision, Termux, and confirmed tool requests, Telegram sends a visible wait message first. "
+            "If another Telegram message arrives while a tool result is still being prepared, tell the owner to wait for the current summary instead of starting a conflicting reply. "
             "When a user replies to a previous Telegram message, treat that quoted text as context for words like this, that, it, and get this."
         ),
     ),

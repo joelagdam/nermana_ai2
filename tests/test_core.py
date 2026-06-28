@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -647,6 +648,32 @@ class AgentTests(unittest.TestCase):
             self.assertIn("latitude 7.4478", result["reply"])
             self.assertNotIn("Let me retrieve", result["reply"])
 
+    def test_agent_yes_runs_tool_from_previous_model_proposal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            session_id = "implicit-confirm"
+            agent.memory.add_message(session_id, "user", "Tell weather")
+            agent.memory.add_message(
+                session_id,
+                "assistant",
+                "I can help look up the weather in Tagum City using the Open-Meteo API. Would you like me to look it up for you?",
+            )
+            weather = {
+                "ok": True,
+                "tool": "current_weather",
+                "location": "Tagum City",
+                "weather": {"current": {"temperature_2m": 30, "weather_code": 1}, "current_units": {"temperature_2m": "C"}},
+            }
+            with patch.object(agent.tools, "run", return_value=weather) as run, patch.object(
+                agent.models, "chat", return_value={"ok": True, "content": "Tagum City is warm and mostly clear."}
+            ):
+                result = agent.chat("Yes", session_id=session_id)
+            self.assertTrue(result["ok"])
+            run.assert_called_once_with("current_weather", {"location": "Tagum City"})
+            self.assertEqual(result["tool_results"][0]["tool"], "current_weather")
+            self.assertIn("Tagum City", result["reply"])
+
     def test_agent_filters_diagnostic_fallback_from_prompt_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")), model=ModelConfig(context_size=4096))
@@ -1110,7 +1137,9 @@ class TelegramTests(unittest.TestCase):
             with patch.object(agent, "chat", side_effect=fake_chat), patch.object(TelegramBot, "_typing_loop", return_value=None), patch(
                 "nermana.telegram_bot.get_json", return_value=HttpResponse(True, 200, {"ok": True, "result": [update]})
             ), patch("nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})):
-                result = TelegramBot(agent).poll_once(timeout=1)
+                bot = TelegramBot(agent)
+                result = bot.poll_once(timeout=1)
+                bot.wait_for_idle()
             self.assertTrue(result["ok"])
             self.assertIn("Telegram reply context", captured[0])
             self.assertIn("Tagum City", captured[0])
@@ -1127,12 +1156,66 @@ class TelegramTests(unittest.TestCase):
             with patch.object(agent, "chat", return_value=chat_result), patch.object(TelegramBot, "_typing_loop", return_value=None), patch(
                 "nermana.telegram_bot.get_json", return_value=HttpResponse(True, 200, {"ok": True, "result": [update]})
             ), patch("nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})) as post:
-                result = TelegramBot(agent).poll_once(timeout=1)
+                bot = TelegramBot(agent)
+                result = bot.poll_once(timeout=1)
+                bot.wait_for_idle()
             sent_texts = [call.args[1]["text"] for call in post.call_args_list if call.args[0].endswith("/sendMessage")]
             self.assertTrue(result["ok"])
             self.assertEqual(len(sent_texts), 2)
             self.assertTrue(sent_texts[0].startswith("⏳"))
             self.assertEqual(sent_texts[1], "Weather for Tagum City: clear.")
+
+    def test_telegram_sends_wait_for_confirmed_pending_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7], offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            session_id = "telegram-123"
+            agent.pending_actions[session_id] = {"tool": "current_weather", "payload": {"location": "Tagum City"}, "reason": "weather"}
+            update = {"update_id": 5, "message": {"chat": {"id": 123}, "from": {"id": 7}, "text": "Yes"}}
+            chat_result = {"ok": True, "reply": "Weather for Tagum City: clear.", "reply_batches": ["Weather for Tagum City: clear."], "model_ok": True}
+            with patch.object(agent, "chat", return_value=chat_result) as chat, patch.object(TelegramBot, "_typing_loop", return_value=None), patch(
+                "nermana.telegram_bot.get_json", return_value=HttpResponse(True, 200, {"ok": True, "result": [update]})
+            ), patch("nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})) as post:
+                bot = TelegramBot(agent)
+                result = bot.poll_once(timeout=1)
+                bot.wait_for_idle()
+            sent_texts = [call.args[1]["text"] for call in post.call_args_list if call.args[0].endswith("/sendMessage")]
+            self.assertTrue(result["ok"])
+            self.assertTrue(sent_texts[0].startswith("⏳"))
+            self.assertIn("weather", sent_texts[0].lower())
+            self.assertEqual(sent_texts[-1], "Weather for Tagum City: clear.")
+            chat.assert_called_once_with("Yes", session_id=session_id)
+
+    def test_telegram_stalls_new_message_while_tool_worker_is_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7], offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            updates = [
+                {"update_id": 5, "message": {"chat": {"id": 123}, "from": {"id": 7}, "text": "/weather"}},
+                {"update_id": 6, "message": {"chat": {"id": 123}, "from": {"id": 7}, "text": "hello?"}},
+            ]
+
+            def slow_chat(text, session_id="default"):
+                time.sleep(0.2)
+                return {"ok": True, "reply": "Weather for Tagum City: clear.", "reply_batches": ["Weather for Tagum City: clear."], "model_ok": True}
+
+            with patch.object(agent, "chat", side_effect=slow_chat), patch.object(TelegramBot, "_typing_loop", return_value=None), patch(
+                "nermana.telegram_bot.get_json", return_value=HttpResponse(True, 200, {"ok": True, "result": updates})
+            ), patch("nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})) as post:
+                bot = TelegramBot(agent)
+                result = bot.poll_once(timeout=1)
+                bot.wait_for_idle()
+            sent_texts = [call.args[1]["text"] for call in post.call_args_list if call.args[0].endswith("/sendMessage")]
+            self.assertTrue(result["ok"])
+            self.assertIn("Checking the weather", sent_texts[0])
+            self.assertIn("Still working", sent_texts[1])
+            self.assertEqual(sent_texts[-1], "Weather for Tagum City: clear.")
 
     def test_telegram_shortens_model_context_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
