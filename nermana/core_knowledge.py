@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-CORE_KNOWLEDGE_VERSION = "2026-06-27.2"
+CORE_KNOWLEDGE_VERSION = "2026-06-28.1"
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,7 @@ CORE_KNOWLEDGE: tuple[KnowledgeCard, ...] = (
         tags=("commands", "tools", "usage", "slash", "chat"),
         content=(
             "Primary commands: /tools or /capabilities for live capability status; /weather [city] for Open-Meteo weather; "
+            "/location [city] or /setweather [city] to geocode and save the default weather latitude/longitude; "
             "/search [query] for web search with DuckDuckGo, Wikipedia, Hacker News, and SearXNG when configured; "
             "/read [path] for allowed file reading; /index [path] for file-to-memory indexing; /phone for Termux phone status; "
             "/termux [allowlisted command] for guarded Termux command execution; "
@@ -46,9 +47,11 @@ CORE_KNOWLEDGE: tuple[KnowledgeCard, ...] = (
         tags=("tools", "policy", "confirmation", "risk", "auto"),
         content=(
             "Use local reasoning first for stable common knowledge. Use weather for weather or forecast requests. "
+            "Use set_weather_location when the owner asks for a weather location, coordinates, latitude, longitude, or automatic city detection. "
             "Use search for current, latest, price, news, online, or lookup requests. Use file tools only inside allowed folders. "
             "Use phone_status for battery/device checks. Shizuku power tools are gated and should ask first. "
-            "Summarize tool results as human text; never dump raw JSON in chat."
+            "When a tool is needed, say that the tool is being checked, run it, then summarize the result as human text. "
+            "Never promise future tool use after the tool result is already available, never dump raw JSON in chat, and be honest when the provider is offline."
         ),
     ),
     KnowledgeCard(
@@ -91,7 +94,8 @@ CORE_KNOWLEDGE: tuple[KnowledgeCard, ...] = (
             "Telegram requires internet, a valid BotFather token, enabled polling, and allowed user IDs if configured. "
             "If messages repeat, drop pending updates or reset offset. If polling conflicts, clear webhook. "
             "If internet is missing, Telegram should show an offline/unreachable status while local web and core chat remain usable. "
-            "During a model reply, Telegram sends typing actions until the answer is ready."
+            "During a model reply, Telegram sends typing actions until the answer is ready. "
+            "When a user replies to a previous Telegram message, treat that quoted text as context for words like this, that, it, and get this."
         ),
     ),
     KnowledgeCard(

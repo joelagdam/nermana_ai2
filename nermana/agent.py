@@ -418,7 +418,7 @@ class AgentCore:
 
     def _direct_tool(self, message: str) -> dict[str, Any] | None:
         lower = message.lower()
-        command_match = re.match(r"^/(search|weather|read|index|image|vision|models|phone|termux)\b\s*(.*)", message, re.I)
+        command_match = re.match(r"^/(search|weather|location|setweather|read|index|image|vision|models|phone|termux)\b\s*(.*)", message, re.I)
         if command_match:
             command = command_match.group(1).lower()
             rest = command_match.group(2).strip()
@@ -426,6 +426,8 @@ class AgentCore:
                 return {"tool": "web_search", "payload": {"query": rest}, "tool_only": False}
             if command == "weather":
                 return {"tool": "current_weather", "payload": {"location": rest}, "tool_only": False}
+            if command in {"location", "setweather"}:
+                return {"tool": "set_weather_location", "payload": {"location": rest}, "tool_only": False}
             if command == "read":
                 return {"tool": "read_file", "payload": {"path": rest}, "tool_only": False}
             if command == "index":
@@ -541,7 +543,7 @@ class AgentCore:
             "vision endpoint configured" if self.config.providers.vision_enabled and self.config.providers.vision_endpoint else "vision endpoint not configured",
         ]
         lines.append("Provider state: " + "; ".join(provider_bits) + ".")
-        lines.append("Commands I recognize: /tools, /weather, /search, /read, /phone, /termux, /image, /vision.")
+        lines.append("Commands I recognize: /tools, /weather, /location, /setweather, /search, /read, /phone, /termux, /image, /vision.")
         return "\n".join(lines)
 
     def _should_report_core_knowledge(self, message: str) -> bool:
@@ -603,7 +605,7 @@ class AgentCore:
         lower = message.lower()
         aliases = {
             "search": {"web_search"},
-            "weather": {"current_weather"},
+            "weather": {"current_weather", "set_weather_location"},
             "file": {"read_file", "index_file"},
             "read": {"read_file"},
             "image": {"generate_image"},
@@ -634,6 +636,8 @@ class AgentCore:
     def _suggest_tool(self, message: str) -> dict[str, Any] | None:
         if not self.config.safety.semi_auto_tools_enabled:
             return None
+        if self._should_set_weather_location(message):
+            return {"tool": "set_weather_location", "payload": {"location": self._extract_weather_location(message)}, "reason": "weather location or coordinate request"}
         if self._should_get_weather(message):
             return {"tool": "current_weather", "payload": {"location": self._extract_location(message)}, "reason": "weather or forecast request"}
         if self._should_search(message):
@@ -710,6 +714,43 @@ class AgentCore:
     def _extract_location(self, message: str) -> str:
         match = re.search(r"(?:in|for)\s+([A-Za-z ,.-]+)$", message)
         return match.group(1).strip() if match else self.config.weather.location_name
+
+    def _should_set_weather_location(self, message: str) -> bool:
+        lower = message.lower()
+        if "weather location" in lower and any(word in lower for word in ["set", "save", "use", "detect", "auto"]):
+            return True
+        coordinate_words = ["latitude", "longitude", "coordinates", "lat/long", "long/lat", "lat long"]
+        if any(word in lower for word in coordinate_words) and any(word in lower for word in ["weather", "city", "location", "tagum", "telegram reply context"]):
+            return True
+        return False
+
+    def _extract_weather_location(self, message: str) -> str:
+        clean = " ".join(message.replace("\n", " ").split())
+        patterns = [
+            r"(?:set|save|use|detect)\s+(?:my\s+)?weather\s+location\s+(?:to|as|for)?\s*([A-Za-z ,.-]+?)(?:[.;]|$)",
+            r"(?:latitude|longitude|coordinates|lat/long|long/lat|lat long)(?:\s+and\s+(?:latitude|longitude))?\s+(?:for|of)\s+([A-Za-z ,.-]+?)(?:[.;]|$)",
+            r"(?:get|find|lookup|retrieve)\s+([A-Za-z ,.-]+?)\s+(?:latitude|longitude|coordinates|lat/long|long/lat|lat long)",
+            r"\bfor\s+([A-Za-z ,.-]+?)\s+(?:weather|latitude|longitude|coordinates)(?:[.;]|$)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, clean, re.I)
+            if match:
+                location = self._clean_location(match.group(1))
+                if location:
+                    return location
+        quoted = re.search(r"Telegram reply context:.*?(?:for|of)\s+([A-Za-z ,.-]+?)(?:[.;]|$)", clean, re.I)
+        if quoted:
+            location = self._clean_location(quoted.group(1))
+            if location:
+                return location
+        return self.config.weather.location_name
+
+    def _clean_location(self, value: str) -> str:
+        cleaned = re.split(r"\b(?:i'll|i will|i need|let me|need to|current weather|weather data|weather information)\b", value, maxsplit=1, flags=re.I)[0]
+        cleaned = re.sub(r"\b(latitude|longitude|coordinates|weather|information|data|current|please|get|set|save|use|detect)\b", " ", cleaned, flags=re.I)
+        cleaned = re.sub(r"[, ]+\bI\b$", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,")
+        return cleaned
 
     def _capability_context(self, compact: bool = False) -> str:
         metadata = self.tools.list_metadata()
@@ -794,7 +835,34 @@ class AgentCore:
             "not able to perform",
             "no search capability",
         ]
-        return any(marker in lower for marker in denial_markers)
+        defer_markers = [
+            "i can help with that",
+            "i'll need to check",
+            "i will need to check",
+            "i need to check",
+            "let me retrieve",
+            "i'll retrieve",
+            "i will retrieve",
+            "let me search",
+            "please wait",
+        ]
+        if any(marker in lower for marker in denial_markers + defer_markers):
+            return True
+        if self._tool_result_has_live_signal(tool_result) and not self._answer_has_live_signal(answer, tool_result):
+            return True
+        return False
+
+    def _tool_result_has_live_signal(self, result: dict[str, Any]) -> bool:
+        text = self._tool_result_to_text(result).lower()
+        signals = ["latitude", "longitude", "weather for", "i found", "source:", "saved as", "temperature", "humidity"]
+        return any(signal in text for signal in signals)
+
+    def _answer_has_live_signal(self, answer: str, result: dict[str, Any]) -> bool:
+        lower = answer.lower()
+        signals = ["latitude", "longitude", "weather for", "found", "source:", "saved", "temperature", "humidity", "clear", "rain", "wind", "warm", "cool"]
+        if any(term in lower for term in re.findall(r"[a-zA-Z]{4,}", str(result.get("location") or "").lower())):
+            return True
+        return any(signal in lower for signal in signals)
 
     def _search_summary(self, result: dict[str, Any]) -> str:
         query = result.get("query", "that")

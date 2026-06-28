@@ -1291,6 +1291,24 @@ document.getElementById("providersForm").addEventListener("submit", async (event
   event.preventDefault();
   await runAction("Providers", () => savePatch(patchFromDottedForm("providersForm")));
 });
+document.getElementById("weatherDetectCoordinates").addEventListener("click", async () => {
+  const form = document.getElementById("providersForm");
+  const location = String(form.elements["weather.location_name"].value || "").trim();
+  if (!location) {
+    renderResult("searchOutput", { ok: false, error: "Weather location is required before coordinates can be detected." });
+    return;
+  }
+  const result = await runAction(
+    "Weather location",
+    () => api("/api/tools/set_weather_location/run", { method: "POST", body: JSON.stringify({ payload: { location } }) }),
+    "Coordinates saved"
+  );
+  renderResult("searchOutput", result);
+  if (result.ok !== false) {
+    config = await api("/api/settings");
+    fillForms();
+  }
+});
 document.getElementById("searchTest").addEventListener("submit", async (event) => {
   event.preventDefault();
   const query = event.currentTarget.query.value.trim();

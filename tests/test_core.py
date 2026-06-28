@@ -9,7 +9,7 @@ from pathlib import Path
 
 from nermana.agent import AgentCore
 from nermana.capabilities import Capability
-from nermana.config import AppConfig, FileConfig, MemoryConfig, ModelConfig, SafetyConfig, SearchConfig, SelfLearningConfig, TelegramConfig, merge_config, reset_config_defaults, save_config
+from nermana.config import AppConfig, FileConfig, MemoryConfig, ModelConfig, SafetyConfig, SearchConfig, SelfLearningConfig, TelegramConfig, WeatherConfig, merge_config, reset_config_defaults, save_config
 from nermana.core_knowledge import knowledge_status, search_core_knowledge
 from nermana.http_client import HttpResponse
 from nermana.model_downloads import delete_partial_download, download_model, list_partial_downloads, list_presets
@@ -23,6 +23,7 @@ from nermana.tooling import Tool, ToolRegistry
 from nermana.tools.files import register_file_tools
 from nermana.tools.phone import register_phone_tools
 from nermana.tools.search import register_search_tools
+from nermana.tools.weather import register_weather_tools
 from nermana.updater import update_status, update_system
 
 
@@ -481,6 +482,69 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(result["provider"], "hackernews")
         self.assertEqual(result["results"][0]["title"], "Nermana search fallback")
 
+    def test_weather_uses_default_location_when_payload_location_empty(self) -> None:
+        cfg = AppConfig(weather=WeatherConfig(location_name="Tagum City", timeout_seconds=1.0))
+        registry = ToolRegistry(cfg)
+        register_weather_tools(registry, cfg)
+        geo = HttpResponse(
+            True,
+            200,
+            {
+                "results": [
+                    {
+                        "name": "Tagum City",
+                        "admin1": "Davao del Norte",
+                        "country": "Philippines",
+                        "latitude": 7.4478,
+                        "longitude": 125.8078,
+                    }
+                ]
+            },
+        )
+        weather = HttpResponse(
+            True,
+            200,
+            {
+                "current": {"temperature_2m": 30, "relative_humidity_2m": 70},
+                "current_units": {"temperature_2m": "C"},
+                "daily": {"time": ["2026-06-28"]},
+            },
+        )
+        with patch("nermana.tools.weather.get_json", side_effect=[geo, weather]) as get:
+            result = registry.run("current_weather", {"location": ""})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["location"], "Tagum City, Davao del Norte, Philippines")
+        self.assertEqual(result["latitude"], 7.4478)
+        self.assertEqual(get.call_args_list[0].args[1]["name"], "Tagum City")
+
+    def test_set_weather_location_saves_lat_lon(self) -> None:
+        cfg = AppConfig(weather=WeatherConfig(location_name="Tagum City", timeout_seconds=1.0))
+        registry = ToolRegistry(cfg)
+        register_weather_tools(registry, cfg)
+        geo = HttpResponse(
+            True,
+            200,
+            {
+                "results": [
+                    {
+                        "name": "Tagum City",
+                        "admin1": "Davao del Norte",
+                        "country": "Philippines",
+                        "latitude": 7.4478,
+                        "longitude": 125.8078,
+                    }
+                ]
+            },
+        )
+        with patch("nermana.tools.weather.get_json", return_value=geo), patch("nermana.tools.weather.save_config") as save:
+            result = registry.run("set_weather_location", {"location": "Tagum City"})
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["saved"])
+        self.assertEqual(cfg.weather.latitude, 7.4478)
+        self.assertEqual(cfg.weather.longitude, 125.8078)
+        self.assertIn("latitude 7.4478", result["summary"])
+        save.assert_called_once_with(cfg)
+
     def test_file_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -559,6 +623,29 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertIn("I found 1 duckduckgo result", result["reply"])
             self.assertNotIn("not able to perform", result["reply"].lower())
+
+    def test_agent_sets_weather_location_from_coordinate_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            tool_result = {
+                "ok": True,
+                "tool": "set_weather_location",
+                "location": "Tagum City, Davao del Norte, Philippines",
+                "latitude": 7.4478,
+                "longitude": 125.8078,
+                "summary": "Weather location saved as Tagum City, Davao del Norte, Philippines: latitude 7.4478, longitude 125.8078.",
+            }
+            with patch.object(agent.tools, "run", return_value=tool_result) as run, patch.object(
+                agent.models,
+                "chat",
+                return_value={"ok": True, "content": "I can help with that. Let me retrieve the weather information for Tagum City."},
+            ):
+                result = agent.chat("Get Tagum City longitude and latitude", session_id="geo")
+            self.assertTrue(result["ok"])
+            run.assert_called_once_with("set_weather_location", {"location": "Tagum City"})
+            self.assertIn("latitude 7.4478", result["reply"])
+            self.assertNotIn("Let me retrieve", result["reply"])
 
     def test_agent_filters_diagnostic_fallback_from_prompt_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -994,6 +1081,58 @@ class TelegramTests(unittest.TestCase):
             sent_texts = [call.args[1]["text"] for call in post.call_args_list if call.args[0].endswith("/sendMessage")]
             self.assertTrue(result["ok"])
             self.assertEqual(sent_texts, ["first", "second"])
+
+    def test_telegram_passes_reply_context_to_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7], offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            update = {
+                "update_id": 5,
+                "message": {
+                    "chat": {"id": 123},
+                    "from": {"id": 7},
+                    "text": "Get this",
+                    "reply_to_message": {
+                        "from": {"username": "nermana"},
+                        "text": "I can help you with that. To get the longitude and latitude for Tagum City, I need the weather tool.",
+                    },
+                },
+            }
+            captured = []
+
+            def fake_chat(text, session_id="default"):
+                captured.append(text)
+                return {"ok": True, "reply": "got it", "reply_batches": ["got it"], "model_ok": True}
+
+            with patch.object(agent, "chat", side_effect=fake_chat), patch.object(TelegramBot, "_typing_loop", return_value=None), patch(
+                "nermana.telegram_bot.get_json", return_value=HttpResponse(True, 200, {"ok": True, "result": [update]})
+            ), patch("nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})):
+                result = TelegramBot(agent).poll_once(timeout=1)
+            self.assertTrue(result["ok"])
+            self.assertIn("Telegram reply context", captured[0])
+            self.assertIn("Tagum City", captured[0])
+
+    def test_telegram_sends_visible_wait_message_for_tool_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7], offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            update = {"update_id": 5, "message": {"chat": {"id": 123}, "from": {"id": 7}, "text": "/weather"}}
+            chat_result = {"ok": True, "reply": "Weather for Tagum City: clear.", "reply_batches": ["Weather for Tagum City: clear."], "model_ok": True}
+            with patch.object(agent, "chat", return_value=chat_result), patch.object(TelegramBot, "_typing_loop", return_value=None), patch(
+                "nermana.telegram_bot.get_json", return_value=HttpResponse(True, 200, {"ok": True, "result": [update]})
+            ), patch("nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})) as post:
+                result = TelegramBot(agent).poll_once(timeout=1)
+            sent_texts = [call.args[1]["text"] for call in post.call_args_list if call.args[0].endswith("/sendMessage")]
+            self.assertTrue(result["ok"])
+            self.assertEqual(len(sent_texts), 2)
+            self.assertTrue(sent_texts[0].startswith("⏳"))
+            self.assertEqual(sent_texts[1], "Weather for Tagum City: clear.")
 
     def test_telegram_shortens_model_context_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

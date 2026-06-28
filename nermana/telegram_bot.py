@@ -136,6 +136,10 @@ class TelegramBot:
             stop_typing = threading.Event()
             typing_thread = threading.Thread(target=self._typing_loop, args=(chat_id, stop_typing), daemon=True)
             typing_thread.start()
+            if self._should_send_tool_wait(text):
+                waiting = self._send(chat_id, self._tool_wait_text(text))
+                if not waiting.get("ok"):
+                    errors.append(waiting.get("error", "send failed"))
             try:
                 chat_result = self.agent.chat(text, session_id=f"telegram-{chat_id}")
             except Exception as exc:
@@ -192,7 +196,54 @@ class TelegramBot:
             or {}
         )
         text = str(message.get("text") or message.get("caption") or "").strip()
+        reply_context = self._reply_context(message)
+        if text and reply_context:
+            text = f"{text}\n\nTelegram reply context: {reply_context}"
         return message, text
+
+    def _reply_context(self, message: dict[str, Any]) -> str:
+        reply = message.get("reply_to_message") or {}
+        if not isinstance(reply, dict):
+            return ""
+        text = str(reply.get("text") or reply.get("caption") or "").strip()
+        if not text:
+            return ""
+        author = reply.get("from") or {}
+        name = author.get("username") or author.get("first_name") or author.get("id") or "message"
+        compact = " ".join(text.split())
+        if len(compact) > 900:
+            compact = compact[:897] + "..."
+        return f"quoted from {name}: {compact}"
+
+    def _should_send_tool_wait(self, text: str) -> bool:
+        lower = text.lower()
+        markers = [
+            "/weather",
+            "/search",
+            "/read",
+            "/phone",
+            "/image",
+            "/vision",
+            "/termux",
+            "weather",
+            "forecast",
+            "search",
+            "look up",
+            "latest",
+            "latitude",
+            "longitude",
+            "coordinates",
+            "telegram reply context",
+        ]
+        return any(marker in lower for marker in markers)
+
+    def _tool_wait_text(self, text: str) -> str:
+        lower = text.lower()
+        if "weather" in lower or "forecast" in lower or "latitude" in lower or "longitude" in lower or "coordinates" in lower:
+            return "⏳ Checking the weather/location tool. I’ll summarize the result when it returns."
+        if "/search" in lower or "search" in lower or "look up" in lower or "latest" in lower:
+            return "⏳ Searching now. I’ll send the useful summary when the results return."
+        return "⏳ Using the needed tool now. I’ll summarize the result when it returns."
 
     def _is_start_command(self, text: str) -> bool:
         lowered = text.strip().lower()
