@@ -518,6 +518,37 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(result["latitude"], 7.4478)
         self.assertEqual(get.call_args_list[0].args[1]["name"], "Tagum City")
 
+    def test_weather_geocode_retries_city_suffix_without_city_word(self) -> None:
+        cfg = AppConfig(weather=WeatherConfig(location_name="Tagum City", timeout_seconds=1.0))
+        registry = ToolRegistry(cfg)
+        register_weather_tools(registry, cfg)
+        empty = HttpResponse(True, 200, {"generationtime_ms": 0.8})
+        geo = HttpResponse(
+            True,
+            200,
+            {
+                "results": [
+                    {
+                        "name": "Tagum",
+                        "admin1": "Davao Region",
+                        "admin2": "Davao del Norte",
+                        "admin3": "City of Tagum",
+                        "country": "Philippines",
+                        "country_code": "PH",
+                        "latitude": 7.4475,
+                        "longitude": 125.8046,
+                    }
+                ]
+            },
+        )
+        weather = HttpResponse(True, 200, {"current": {"temperature_2m": 30}, "current_units": {"temperature_2m": "C"}})
+        with patch("nermana.tools.weather.get_json", side_effect=[empty, geo, weather]) as get:
+            result = registry.run("current_weather", {"location": "Tagum City"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["location"], "Tagum, Davao del Norte, Philippines")
+        self.assertEqual(get.call_args_list[0].args[1]["name"], "Tagum City")
+        self.assertEqual(get.call_args_list[1].args[1]["name"], "Tagum")
+
     def test_set_weather_location_saves_lat_lon(self) -> None:
         cfg = AppConfig(weather=WeatherConfig(location_name="Tagum City", timeout_seconds=1.0))
         registry = ToolRegistry(cfg)
@@ -673,6 +704,17 @@ class AgentTests(unittest.TestCase):
             run.assert_called_once_with("current_weather", {"location": "Tagum City"})
             self.assertEqual(result["tool_results"][0]["tool"], "current_weather")
             self.assertIn("Tagum City", result["reply"])
+
+    def test_agent_reports_failed_suggested_tool_without_model_softening(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            failure = {"ok": False, "tool": "current_weather", "error": "location not found: Tagum City"}
+            with patch.object(agent.tools, "run", return_value=failure), patch.object(agent.models, "chat") as chat:
+                result = agent.chat("Tell weather", session_id="weather-failure")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["reply"], "location not found: Tagum City")
+            chat.assert_not_called()
 
     def test_agent_filters_diagnostic_fallback_from_prompt_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

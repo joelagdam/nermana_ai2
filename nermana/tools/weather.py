@@ -16,18 +16,28 @@ def register_weather_tools(registry: ToolRegistry, config: AppConfig) -> None:
         location = str(location or "").strip()
         if not location:
             return {"ok": False, "error": "location is required"}
-        geo = get_json(
-            "https://geocoding-api.open-meteo.com/v1/search",
-            {"name": location, "count": 1, "language": "en", "format": "json"},
-            timeout=config.weather.timeout_seconds,
-        )
-        if not geo.ok:
-            return {"ok": False, "error": f"geocoding unavailable: {geo.error}"}
-        results = geo.data.get("results") or []
+        results = []
+        last_error = ""
+        searched: list[str] = []
+        for candidate in _geocode_candidates(location):
+            searched.append(candidate)
+            geo = get_json(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                {"name": candidate, "count": 3, "language": "en", "format": "json"},
+                timeout=config.weather.timeout_seconds,
+            )
+            if not geo.ok:
+                last_error = str(geo.error)
+                continue
+            results = geo.data.get("results") or []
+            if results:
+                break
+        if last_error and not results:
+            return {"ok": False, "error": f"geocoding unavailable: {last_error}"}
         if not results:
             return {"ok": False, "error": f"location not found: {location}"}
-        item = results[0]
-        name = ", ".join(part for part in [item.get("name"), item.get("admin1"), item.get("country")] if part)
+        item = _best_location_result(results, location)
+        name = ", ".join(part for part in [item.get("name"), item.get("admin2") or item.get("admin1"), item.get("country")] if part)
         return {
             "ok": True,
             "location": name or location,
@@ -35,6 +45,7 @@ def register_weather_tools(registry: ToolRegistry, config: AppConfig) -> None:
             "longitude": item["longitude"],
             "timezone": item.get("timezone", ""),
             "country": item.get("country", ""),
+            "searched": searched,
         }
 
     def current_weather(payload: dict) -> dict:
@@ -119,3 +130,28 @@ def register_weather_tools(registry: ToolRegistry, config: AppConfig) -> None:
             availability=available,
         )
     )
+
+
+def _geocode_candidates(location: str) -> list[str]:
+    clean = " ".join(str(location or "").split()).strip()
+    candidates = [clean] if clean else []
+    lower = clean.lower()
+    if lower.endswith(" city"):
+        candidates.append(clean[:-5].strip())
+    if lower.startswith("city of "):
+        candidates.append(clean[8:].strip())
+    unique = []
+    for item in candidates:
+        if item and item.lower() not in {seen.lower() for seen in unique}:
+            unique.append(item)
+    return unique
+
+
+def _best_location_result(results: list[dict], location: str) -> dict:
+    lower = location.lower()
+    if "tagum" in lower:
+        for item in results:
+            haystack = " ".join(str(item.get(key, "")) for key in ["name", "admin1", "admin2", "admin3", "country"]).lower()
+            if "tagum" in haystack and ("davao" in haystack or item.get("country_code") == "PH"):
+                return item
+    return results[0]

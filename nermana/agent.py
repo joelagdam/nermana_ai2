@@ -83,6 +83,9 @@ class AgentCore:
                     answer = self._request_tool_confirmation(session_id, suggestion)
                     return self._finish(session_id, message, answer, pending_tool=suggestion)
                 tool_results.append(tool_result)
+                if not tool_result.get("ok"):
+                    answer = self._tool_result_to_text(tool_result)
+                    return self._finish(session_id, message, answer, tool_results)
                 tool_context = self._tool_result_to_text(tool_result)
 
         memories = self._select_memories(message, limit=4)
