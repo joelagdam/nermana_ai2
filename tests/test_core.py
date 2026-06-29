@@ -285,6 +285,26 @@ class ModelTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(manager.effective_context_size(), 512)
 
+    def test_chat_success_marks_runtime_ready(self) -> None:
+        cfg = AppConfig(model=ModelConfig(active_model="active.gguf", context_size=4096))
+        manager = ModelManager(cfg, persist=False)
+        good = HttpResponse(True, 200, {"choices": [{"message": {"content": "OK"}}]})
+        with patch("nermana.models.post_json", return_value=good):
+            result = manager.chat([{"role": "user", "content": "hello"}])
+        self.assertTrue(result["ok"])
+        self.assertTrue(manager.runtime_status(max_age_seconds=60)["ok"])
+
+    def test_runtime_status_keeps_recent_success_when_probe_times_out(self) -> None:
+        cfg = AppConfig(model=ModelConfig(active_model="active.gguf", context_size=4096))
+        manager = ModelManager(cfg, persist=False)
+        manager._cache_runtime({"ok": True, "ready": True, "server_context_size": 2048, "state": "chat ready"})
+        models = HttpResponse(True, 200, {"data": [{"id": "active.gguf", "meta": {"n_ctx": 2048}}]})
+        timeout = HttpResponse(False, 0, None, "timed out")
+        with patch("nermana.models.get_json", return_value=models), patch("nermana.models.post_json", return_value=timeout):
+            result = manager.runtime_status(force=True)
+        self.assertTrue(result["ok"])
+        self.assertIn("slow health probe", result["state"])
+
     def test_server_log_tail_reads_recent_llama_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig()

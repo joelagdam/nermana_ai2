@@ -180,6 +180,8 @@ class ModelManager:
     def runtime_status(self, force: bool = False, max_age_seconds: float = 8.0) -> dict[str, Any]:
         if not force and self._runtime_cache and time.time() - self._runtime_cache_at < max_age_seconds:
             return dict(self._runtime_cache)
+        previous = dict(self._runtime_cache or {})
+        previous_age = time.time() - self._runtime_cache_at if self._runtime_cache_at else 999999.0
         health = self.server_health()
         if not health.get("endpoint_ok"):
             self._cache_runtime(health)
@@ -198,6 +200,11 @@ class ModelManager:
         health["chat_check"] = {"ok": bool(chat.get("ok")), "error": chat.get("error", ""), "model": chat.get("model")}
         self._attach_context_status(health, chat.get("error", ""))
         health["state"] = "chat ready" if chat.get("ok") else "endpoint reachable, chat failed"
+        if not chat.get("ok") and previous.get("ok") and previous_age <= 300 and self._slow_probe_error(chat.get("error", "")):
+            health["ok"] = True
+            health["ready"] = True
+            health["state"] = "chat ready; slow health probe timed out"
+            health["last_probe_error"] = chat.get("error", "")
         self._cache_runtime(health)
         return health
 
@@ -323,6 +330,7 @@ class ModelManager:
             content = response.data["choices"][0]["message"]["content"]
         except Exception:
             return {"ok": False, "error": "Model response did not match OpenAI chat format.", "raw": response.data}
+        self._cache_chat_success(selected_model)
         return {"ok": True, "content": content, "raw": response.data, "model": selected_model}
 
     def _cache_context_error(self, error: str) -> None:
@@ -346,6 +354,32 @@ class ModelManager:
                 "Nermana will compact prompts until the model server is restarted with matching settings."
             )
         self._cache_runtime(health)
+
+    def _cache_chat_success(self, model_name: str) -> None:
+        configured = int(self.config.model.context_size or 0)
+        live = self.cached_server_context_size(max_age_seconds=300)
+        health = {
+            "ok": True,
+            "endpoint_ok": True,
+            "ready": True,
+            "base_url": self.config.model.base_url,
+            "chat_model": model_name,
+            "state": "chat ready",
+            "configured_context_size": configured,
+            "context_mismatch": bool(live and configured > live),
+        }
+        if live:
+            health["server_context_size"] = live
+        if live and configured > live:
+            health["context_warning"] = (
+                f"llama.cpp is serving {live} tokens, but Nermana is configured for {configured}. "
+                "Nermana will budget against the smaller live context."
+            )
+        self._cache_runtime(health)
+
+    def _slow_probe_error(self, error: str) -> bool:
+        lower = str(error or "").lower()
+        return "timed out" in lower or "timeout" in lower or "loading model" in lower
 
     def restart_server(self) -> dict[str, Any]:
         self.invalidate_runtime_cache()
