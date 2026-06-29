@@ -112,6 +112,7 @@ def register_phone_tools(registry: ToolRegistry, config: AppConfig) -> None:
         command = str(payload.get("command", "")).strip()
         if not command:
             return {"ok": False, "error": "command is required"}
+        command = _normalize_termux_command_alias(command)
         if len(command) > 500:
             return {"ok": False, "error": "command is too long"}
         if "\n" in command or SHELL_META_RE.search(command):
@@ -202,6 +203,17 @@ def _run(command: list[str], timeout: float) -> dict:
         "stderr": completed.stderr.strip(),
         "command": command,
     }
+
+
+def _normalize_termux_command_alias(command: str) -> str:
+    lowered = " ".join(command.lower().strip().split())
+    aliases = {
+        "battery": "termux-battery-status",
+        "battery status": "termux-battery-status",
+        "battery percentage": "termux-battery-status",
+        "termux battery": "termux-battery-status",
+    }
+    return aliases.get(lowered, command)
 
 
 def _privileged(config: AppConfig, command: str) -> dict:

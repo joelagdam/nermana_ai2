@@ -419,6 +419,17 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(result["stdout"], "Sat Jun 27")
         run.assert_called_once()
 
+    def test_termux_command_accepts_battery_alias(self) -> None:
+        cfg = AppConfig()
+        registry = ToolRegistry(cfg)
+        register_phone_tools(registry, cfg)
+        with patch("nermana.tools.phone.shutil.which", return_value="/data/data/com.termux/files/usr/bin/termux-battery-status"), patch(
+            "nermana.tools.phone.subprocess.run", return_value=FakeCompleted(stdout='{"percentage":54,"status":"DISCHARGING"}')
+        ) as run:
+            result = registry.run("termux_command", {"command": "battery"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(run.call_args.args[0][0], "termux-battery-status")
+
     def test_termux_command_rejects_shell_metacharacters(self) -> None:
         cfg = AppConfig()
         registry = ToolRegistry(cfg)
@@ -1062,6 +1073,49 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(result["tool_results"][0]["tool"], "current_weather")
             self.assertEqual(result["reply"], "Tagum City is warm and mostly clear.")
 
+    def test_agent_summarizes_phone_battery_tool_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            phone = {
+                "ok": True,
+                "tool": "phone_status",
+                "battery": {"ok": True, "json": {"percentage": 54, "status": "DISCHARGING", "health": "GOOD", "temperature": 312}},
+                "termux": "Termux:API command found",
+                "shizuku": "rish not found",
+            }
+            with patch.object(agent.tools, "run", return_value=phone), patch.object(agent.models, "chat", return_value={"ok": True, "content": "I'll check the battery percentage for you."}):
+                result = agent.chat("just get the battery percentage", session_id="battery")
+            self.assertEqual(result["tool_results"][0]["tool"], "phone_status")
+            self.assertIn("Battery: 54%", result["reply"])
+            self.assertIn("discharging", result["reply"])
+            self.assertNotIn("I'll check", result["reply"])
+
+    def test_agent_confirms_battery_promise_from_previous_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            session_id = "battery-confirm"
+            agent.memory.add_message(session_id, "assistant", "I'll check the current battery percentage for you. Let me run the `battery` command.")
+            phone = {
+                "ok": True,
+                "tool": "phone_status",
+                "battery": {"ok": True, "json": {"percentage": 54, "status": "CHARGING"}},
+                "termux": "Termux:API command found",
+                "shizuku": "rish not found",
+            }
+            with patch.object(agent.tools, "run", return_value=phone), patch.object(agent.models, "chat", return_value={"ok": True, "content": "I'll check the current battery percentage for you."}):
+                result = agent.chat("yes, continue", session_id=session_id)
+            self.assertEqual(result["tool_results"][0]["tool"], "phone_status")
+            self.assertIn("Battery: 54%", result["reply"])
+
+    def test_reply_context_alone_does_not_trigger_tool_without_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
+            agent = AgentCore(cfg)
+            message = "thanks\n\nTelegram reply context: quoted from nermana: I'll check the weather in Tagum City."
+            self.assertEqual(agent.tool_target_for_message(message, session_id="quoted-thanks"), "")
+
     def test_agent_can_confirm_memory_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")))
@@ -1231,6 +1285,63 @@ class TelegramTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertIn("Telegram reply context", captured[0])
             self.assertIn("Tagum City", captured[0])
+
+    def test_telegram_waits_for_quoted_battery_promise(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7], offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            update = {
+                "update_id": 5,
+                "message": {
+                    "chat": {"id": 123},
+                    "from": {"id": 7},
+                    "text": "try that one as example",
+                    "reply_to_message": {
+                        "from": {"username": "nermana"},
+                        "text": "Yes, I can run Termux commands. I'll use the `battery` command.",
+                    },
+                },
+            }
+            chat_result = {"ok": True, "reply": "Battery: 54%, discharging.", "reply_batches": ["Battery: 54%, discharging."], "model_ok": True}
+            with patch.object(agent, "chat", return_value=chat_result) as chat, patch.object(TelegramBot, "_typing_loop", return_value=None), patch(
+                "nermana.telegram_bot.get_json", return_value=HttpResponse(True, 200, {"ok": True, "result": [update]})
+            ), patch("nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})) as post:
+                bot = TelegramBot(agent)
+                result = bot.poll_once(timeout=1)
+                bot.wait_for_idle()
+            sent_texts = [call.args[1]["text"] for call in post.call_args_list if call.args[0].endswith("/sendMessage")]
+            self.assertTrue(result["ok"])
+            self.assertIn("phone/Termux", sent_texts[0])
+            self.assertEqual(sent_texts[-1], "Battery: 54%, discharging.")
+            self.assertIn("Telegram reply context", chat.call_args.args[0])
+
+    def test_telegram_does_not_wait_for_plain_reply_to_tool_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", allowed_user_ids=[7], offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            agent = AgentCore(cfg)
+            update = {
+                "update_id": 5,
+                "message": {
+                    "chat": {"id": 123},
+                    "from": {"id": 7},
+                    "text": "thanks",
+                    "reply_to_message": {"from": {"username": "nermana"}, "text": "I'll check the weather in Tagum City."},
+                },
+            }
+            chat_result = {"ok": True, "reply": "Noted.", "reply_batches": ["Noted."], "model_ok": True}
+            with patch.object(agent, "chat", return_value=chat_result), patch.object(TelegramBot, "_typing_loop", return_value=None), patch(
+                "nermana.telegram_bot.get_json", return_value=HttpResponse(True, 200, {"ok": True, "result": [update]})
+            ), patch("nermana.telegram_bot.post_json", return_value=HttpResponse(True, 200, {"ok": True})) as post:
+                result = TelegramBot(agent).poll_once(timeout=1)
+            sent_texts = [call.args[1]["text"] for call in post.call_args_list if call.args[0].endswith("/sendMessage")]
+            self.assertTrue(result["ok"])
+            self.assertEqual(sent_texts, ["Noted."])
 
     def test_telegram_sends_visible_wait_message_for_tool_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

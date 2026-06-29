@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+import json
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -131,6 +132,21 @@ class AgentCore:
 
     def run_tool(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self.tools.run(name, payload)
+
+    def tool_target_for_message(self, message: str, session_id: str = "default") -> str:
+        pending = self.pending_actions.get(session_id)
+        if pending and self._is_confirmation_reply(message):
+            return str(pending.get("tool") or "")
+        direct = self._direct_tool(message)
+        if direct:
+            return str(direct.get("tool") or "")
+        implicit = self._maybe_infer_confirmed_tool(message, session_id)
+        if implicit:
+            return str(implicit.get("tool") or "")
+        suggestion = self._suggest_tool(message)
+        if suggestion and suggestion.get("tool") != "memory":
+            return str(suggestion.get("tool") or "")
+        return ""
 
     def _chat_model(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         first = self._try_model_chat(messages)
@@ -441,6 +457,7 @@ class AgentCore:
         return "/think" if any(word in message.lower() for word in hard_words) else "/no_think"
 
     def _direct_tool(self, message: str) -> dict[str, Any] | None:
+        message = self._primary_user_text(message) or message
         lower = message.lower()
         command_match = re.match(r"^/(search|weather|location|setweather|read|index|image|vision|models|phone|termux)\b\s*(.*)", message, re.I)
         if command_match:
@@ -660,17 +677,18 @@ class AgentCore:
     def _suggest_tool(self, message: str) -> dict[str, Any] | None:
         if not self.config.safety.semi_auto_tools_enabled:
             return None
-        if self._should_set_weather_location(message):
-            return {"tool": "set_weather_location", "payload": {"location": self._extract_weather_location(message)}, "reason": "weather location or coordinate request"}
-        if self._should_get_weather(message):
-            return {"tool": "current_weather", "payload": {"location": self._extract_location(message)}, "reason": "weather or forecast request"}
-        if self._should_search(message):
-            return {"tool": "web_search", "payload": {"query": message}, "reason": "current information request"}
-        lower = message.lower()
+        primary = self._primary_user_text(message) or message
+        if self._should_set_weather_location(primary):
+            return {"tool": "set_weather_location", "payload": {"location": self._extract_weather_location(primary)}, "reason": "weather location or coordinate request"}
+        if self._should_get_weather(primary):
+            return {"tool": "current_weather", "payload": {"location": self._extract_location(primary)}, "reason": "weather or forecast request"}
+        if self._should_search(primary):
+            return {"tool": "web_search", "payload": {"query": primary}, "reason": "current information request"}
+        lower = primary.lower()
         if any(word in lower for word in ["battery", "phone status", "device status"]):
             return {"tool": "phone_status", "payload": {}, "reason": "phone status request"}
         if any(word in lower for word in ["remember this", "save this to memory"]):
-            return {"tool": "memory", "payload": {"content": message}, "reason": "memory request"}
+            return {"tool": "memory", "payload": {"content": primary}, "reason": "memory request"}
         return None
 
     def _request_tool_confirmation(self, session_id: str, suggestion: dict[str, Any]) -> str:
@@ -701,11 +719,11 @@ class AgentCore:
         pending = self.pending_actions.get(session_id)
         if not pending:
             return None
-        lowered = message.lower().strip()
+        lowered = self._primary_user_text(message).lower().strip()
         if lowered in {"cancel", "no", "stop", "skip"}:
             self.pending_actions.pop(session_id, None)
             return {"ok": True, "content": "Canceled."}
-        if lowered not in {"yes", "y", "confirm", "go", "run", "do it", "ok"}:
+        if not self._is_confirmation_reply(lowered):
             return None
         self.pending_actions.pop(session_id, None)
         if pending["tool"] == "memory":
@@ -717,26 +735,74 @@ class AgentCore:
         if not self._is_confirmation_reply(message):
             return None
         previous = self._previous_assistant_message(session_id)
-        if not previous:
+        context = f"{previous}\n{message}".strip()
+        if not context:
             return None
-        lower = previous.lower()
+        lower = context.lower()
+        if any(word in lower for word in ["battery", "battery percentage", "battery status"]):
+            return {
+                "tool": "phone_status",
+                "payload": {},
+                "reason": "confirmed battery status check",
+            }
+        if "termux" in lower or "command" in lower:
+            command = self._extract_termux_command_from_text(context)
+            if command:
+                return {
+                    "tool": "termux_command",
+                    "payload": {"command": command},
+                    "reason": "confirmed Termux command from previous reply",
+                }
         if any(word in lower for word in ["weather", "forecast", "open-meteo", "latitude", "longitude", "coordinates"]):
             return {
                 "tool": "current_weather",
-                "payload": {"location": self._extract_weather_location_from_text(previous)},
+                "payload": {"location": self._extract_weather_location_from_text(context)},
                 "reason": "confirmed weather lookup from previous reply",
             }
         if any(phrase in lower for phrase in ["search for", "look up", "search online", "find online"]):
             return {
                 "tool": "web_search",
-                "payload": {"query": self._extract_search_query_from_text(previous)},
+                "payload": {"query": self._extract_search_query_from_text(context)},
                 "reason": "confirmed search from previous reply",
             }
         return None
 
     def _is_confirmation_reply(self, message: str) -> bool:
-        lowered = re.sub(r"[.!?]+$", "", message.lower().strip())
-        return lowered in {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "go", "go ahead", "do it", "please do", "run it"}
+        lowered = self._primary_user_text(message)
+        lowered = re.sub(r"[.!?]+$", "", lowered.lower().strip())
+        lowered = " ".join(lowered.replace(",", " ").split())
+        exact = {
+            "yes",
+            "y",
+            "yeah",
+            "yep",
+            "sure",
+            "ok",
+            "okay",
+            "go",
+            "go ahead",
+            "do it",
+            "please do",
+            "run it",
+            "run",
+            "confirm",
+            "continue",
+            "yes continue",
+            "try it",
+            "try that",
+            "try that one",
+            "do that",
+            "run that",
+            "use that",
+            "that one",
+            "get this",
+        }
+        if lowered in exact:
+            return True
+        return lowered.startswith(("try that ", "run the command", "run that ", "just get ", "get the ", "tell me the "))
+
+    def _primary_user_text(self, message: str) -> str:
+        return str(message or "").split("Telegram reply context:", 1)[0].strip()
 
     def _previous_assistant_message(self, session_id: str) -> str:
         try:
@@ -770,6 +836,21 @@ class AgentCore:
         if match:
             return match.group(1).strip(" .")
         return self._compact_text(clean, 180)
+
+    def _extract_termux_command_from_text(self, text: str) -> str:
+        clean = " ".join(str(text or "").replace("\n", " ").split())
+        if "battery" in clean.lower():
+            return "termux-battery-status"
+        for pattern in [r"`([^`]+)`", r"'([^']+)'", r'"([^"]+)"']:
+            match = re.search(pattern, clean)
+            if match:
+                command = match.group(1).strip()
+                if command:
+                    return command
+        match = re.search(r"(?:run|use|try)\s+(?:the\s+)?(?:command\s+)?([A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_./:-]+){0,4})", clean, re.I)
+        if match:
+            return match.group(1).strip()
+        return ""
 
     def _should_search(self, message: str) -> bool:
         lower = message.lower()
@@ -882,6 +963,8 @@ class AgentCore:
             return result.get("error", "Tool failed.")
         if "summary" in result:
             return str(result["summary"])
+        if "battery" in result:
+            return self._phone_status_summary(result)
         if "weather" in result:
             return self._weather_summary(result)
         if "results" in result:
@@ -925,6 +1008,12 @@ class AgentCore:
             "let me retrieve",
             "i'll retrieve",
             "i will retrieve",
+            "i'll check",
+            "i will check",
+            "let me check",
+            "i'll run",
+            "i will run",
+            "let me run",
             "let me search",
             "please wait",
         ]
@@ -936,12 +1025,12 @@ class AgentCore:
 
     def _tool_result_has_live_signal(self, result: dict[str, Any]) -> bool:
         text = self._tool_result_to_text(result).lower()
-        signals = ["latitude", "longitude", "weather for", "i found", "source:", "saved as", "temperature", "humidity"]
+        signals = ["latitude", "longitude", "weather for", "i found", "source:", "saved as", "temperature", "humidity", "battery", "termux", "command output"]
         return any(signal in text for signal in signals)
 
     def _answer_has_live_signal(self, answer: str, result: dict[str, Any]) -> bool:
         lower = answer.lower()
-        signals = ["latitude", "longitude", "weather for", "found", "source:", "saved", "temperature", "humidity", "clear", "rain", "wind", "warm", "cool"]
+        signals = ["latitude", "longitude", "weather for", "found", "source:", "saved", "temperature", "humidity", "clear", "rain", "wind", "warm", "cool", "battery", "%", "charging", "discharging", "termux", "command output"]
         if any(term in lower for term in re.findall(r"[a-zA-Z]{4,}", str(result.get("location") or "").lower())):
             return True
         return any(signal in lower for signal in signals)
@@ -997,6 +1086,48 @@ class AgentCore:
         if forecast:
             parts.append("Next days: " + "; ".join(forecast) + ".")
         return " ".join(parts)
+
+    def _phone_status_summary(self, result: dict[str, Any]) -> str:
+        battery = result.get("battery") or {}
+        parts = []
+        data = battery.get("json") if isinstance(battery, dict) else None
+        if isinstance(data, dict):
+            percent = data.get("percentage")
+            status = str(data.get("status") or "").lower()
+            health = str(data.get("health") or "").lower()
+            temp = data.get("temperature")
+            line = "Battery"
+            if percent is not None:
+                line += f": {percent}%"
+            if status:
+                line += f", {status}"
+            if health:
+                line += f", health {health}"
+            if temp is not None:
+                try:
+                    temp_value = float(temp)
+                    if temp_value > 100:
+                        temp_value = temp_value / 10
+                    line += f", {temp_value:g}C"
+                except (TypeError, ValueError):
+                    line += f", temp {temp}"
+            parts.append(line + ".")
+        elif isinstance(battery, dict) and battery.get("ok") and battery.get("stdout"):
+            stdout = str(battery.get("stdout") or "")
+            try:
+                parsed = json.loads(stdout)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                return self._phone_status_summary({**result, "battery": {**battery, "json": parsed}})
+            parts.append("Battery command output: " + self._compact_text(stdout, 500))
+        elif isinstance(battery, dict):
+            parts.append("Battery command failed: " + str(battery.get("error") or battery.get("stderr") or "unavailable") + ".")
+        if result.get("termux"):
+            parts.append(f"Termux: {result['termux']}.")
+        if result.get("shizuku"):
+            parts.append(f"Shizuku: {result['shizuku']}.")
+        return " ".join(parts) if parts else "Phone status checked."
 
     def _fallback_reply(self, message: str, memories: list, tool_results: list[dict[str, Any]], model_error: str) -> str:
         if tool_results:
@@ -1159,6 +1290,10 @@ class AgentCore:
         labels = []
         if result.get("tool"):
             labels.append(f"{result['tool']} finished.")
+        if result.get("stdout"):
+            labels.append("Command output: " + self._compact_text(str(result.get("stdout") or ""), 800))
+        if result.get("stderr"):
+            labels.append("Command error output: " + self._compact_text(str(result.get("stderr") or ""), 400))
         if result.get("path"):
             labels.append(f"Path: {result['path']}")
         if result.get("memory_id"):

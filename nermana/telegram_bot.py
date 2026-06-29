@@ -285,35 +285,25 @@ class TelegramBot:
         return f"quoted from {name}: {compact}"
 
     def _should_send_tool_wait(self, text: str, session_id: str = "") -> bool:
-        lower = text.lower()
-        markers = [
-            "/weather",
-            "/search",
-            "/read",
-            "/phone",
-            "/image",
-            "/vision",
-            "/termux",
-            "weather",
-            "forecast",
-            "search",
-            "look up",
-            "latest",
-            "latitude",
-            "longitude",
-            "coordinates",
-            "telegram reply context",
-        ]
-        return any(marker in lower for marker in markers) or bool(self._confirmed_tool_target(text, session_id))
+        return bool(self._tool_target(text, session_id))
 
     def _tool_wait_text(self, text: str, session_id: str = "") -> str:
         lower = text.lower()
-        target = self._confirmed_tool_target(text, session_id)
+        target = self._tool_target(text, session_id)
         if target == "current_weather" or "weather" in lower or "forecast" in lower or "latitude" in lower or "longitude" in lower or "coordinates" in lower:
             return "⏳ Checking the weather/location tool. I’ll summarize the result when it returns."
         if target == "web_search" or "/search" in lower or "search" in lower or "look up" in lower or "latest" in lower:
             return "⏳ Searching now. I’ll send the useful summary when the results return."
+        if target in {"phone_status", "termux_command"}:
+            return "⏳ Running the phone/Termux check now. I’ll summarize the result when it returns."
         return "⏳ Using the needed tool now. I’ll summarize the result when it returns."
+
+    def _tool_target(self, text: str, session_id: str) -> str:
+        try:
+            target = self.agent.tool_target_for_message(text, session_id=session_id)
+        except Exception:
+            target = ""
+        return target or self._confirmed_tool_target(text, session_id)
 
     def _busy_wait_text(self) -> str:
         return "⏳ Still working on the current result. Please wait; I’ll send the summary as soon as it finishes."
