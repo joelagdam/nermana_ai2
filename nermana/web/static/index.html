@@ -424,8 +424,10 @@
           <form id="selfLearningSettings" class="grid-form">
             <label>Enabled <input name="self_learning.enabled" type="checkbox" /></label>
             <label>Auto repair <input name="self_learning.auto_repair" type="checkbox" /></label>
+            <label>Heal on error <input name="self_learning.heal_on_error" type="checkbox" /></label>
             <label>Interval seconds <input name="self_learning.interval_seconds" type="number" min="60" step="30" /></label>
             <label>Repair cooldown seconds <input name="self_learning.repair_cooldown_seconds" type="number" min="30" step="30" /></label>
+            <label>Error heal cooldown seconds <input name="self_learning.heal_on_error_cooldown_seconds" type="number" min="5" step="5" /></label>
             <label>Tail lines <input name="self_learning.tail_lines" type="number" min="1" max="500" /></label>
             <button class="primary-action">Save Self Learning</button>
           </form>

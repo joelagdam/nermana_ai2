@@ -1550,6 +1550,61 @@ class DashboardTests(unittest.TestCase):
             repair.assert_called_once_with("auto")
             self.assertEqual(server.self_learning_status()["worker"]["repairs"], 1)
 
+    def test_error_trigger_starts_background_self_heal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+                self_learning=SelfLearningConfig(
+                    auto_repair=True,
+                    heal_on_error=True,
+                    heal_on_error_cooldown_seconds=5,
+                    log_path=str(Path(tmp) / "self.log"),
+                ),
+            )
+            server = SimpleNermanaServer(AgentCore(cfg))
+            with patch.object(server, "run_self_learning_cycle", return_value={"ok": True, "repair": {"ok": True}}) as cycle:
+                result = server.trigger_self_heal("web_chat", {"ok": False, "error": "connection refused"})
+                self.assertTrue(result["started"])
+                server.self_heal_thread.join(timeout=2)
+            cycle.assert_called_once_with(auto_repair=True, repair_cooldown_seconds=5)
+            status = server.self_learning_status()
+            self.assertFalse(status["worker"]["healing"])
+            self.assertEqual(status["worker"]["heals"], 1)
+            self.assertTrue(any("auto heal started" in line for line in status["log"]["lines"]))
+
+    def test_error_trigger_respects_heal_cooldown_and_ignores_user_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+                self_learning=SelfLearningConfig(
+                    auto_repair=True,
+                    heal_on_error=True,
+                    heal_on_error_cooldown_seconds=30,
+                    log_path=str(Path(tmp) / "self.log"),
+                ),
+            )
+            server = SimpleNermanaServer(AgentCore(cfg))
+            server._set_self_learning_state(last_heal_at=time.time())
+            with patch.object(server, "run_self_learning_cycle") as cycle:
+                result = server.trigger_self_heal("web_chat", {"ok": False, "error": "HTTP Error 503: Service Unavailable: Loading model"})
+            self.assertFalse(result["started"])
+            self.assertEqual(result["reason"], "cooldown")
+            cycle.assert_not_called()
+            self.assertIsNone(server.trigger_self_heal_from_result("weather", {"ok": False, "error": "location not found: Tagum City"}))
+
+    def test_telegram_chat_error_callback_triggers_for_model_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                telegram=TelegramConfig(enabled=True, token="token", offset_path=str(Path(tmp) / "offset.txt")),
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+            )
+            events = []
+            bot = TelegramBot(AgentCore(cfg), error_callback=lambda source, details: events.append((source, details)))
+            bot._notify_result_error("telegram_chat", {"ok": True, "model_ok": False, "model_error": "HTTP Error 503: Service Unavailable: Loading model"})
+            bot._notify_result_error("telegram_chat", {"ok": True, "reply": "fine"})
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0][0], "telegram_chat")
+
 
 class UpdaterTests(unittest.TestCase):
     def test_update_status_falls_back_to_origin_main_without_upstream(self) -> None:

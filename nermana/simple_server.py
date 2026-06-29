@@ -44,17 +44,23 @@ class SimpleNermanaServer:
             "offset": 0,
         }
         self.self_learning_thread: threading.Thread | None = None
+        self.self_heal_thread: threading.Thread | None = None
         self.self_learning_stop = threading.Event()
         self.self_learning_lock = threading.Lock()
         self.self_learning_state: dict = {
             "ok": True,
             "running": False,
+            "healing": False,
             "started_at": 0,
             "last_cycle_at": 0,
             "last_repair_at": 0,
+            "last_heal_at": 0,
+            "last_heal_source": "",
+            "last_heal_error": "",
             "last_error": "",
             "cycles": 0,
             "repairs": 0,
+            "heals": 0,
             "last_summary": "",
         }
 
@@ -489,7 +495,7 @@ class SimpleNermanaServer:
             return {"ok": False, "error": "Telegram is disabled or token is missing."}
         if self.telegram_thread and self.telegram_thread.is_alive():
             return {"ok": True, "message": "Telegram polling already running.", "worker": self.telegram_worker_status()}
-        bot = TelegramBot(self.agent)
+        bot = TelegramBot(self.agent, error_callback=self.trigger_self_heal)
         status = bot.status()
         if not status.get("ok"):
             self._set_telegram_state(ok=False, running=False, last_error=status.get("error", "Telegram is not ready."))
@@ -542,6 +548,8 @@ class SimpleNermanaServer:
         with self.self_learning_lock:
             state = dict(self.self_learning_state)
         state["thread_alive"] = bool(self.self_learning_thread and self.self_learning_thread.is_alive())
+        state["heal_thread_alive"] = bool(self.self_heal_thread and self.self_heal_thread.is_alive())
+        state["healing"] = bool(state.get("healing") or state["heal_thread_alive"])
         if not state["thread_alive"] and state.get("running"):
             state["running"] = False
             state["ok"] = False
@@ -551,7 +559,7 @@ class SimpleNermanaServer:
             result["log"] = tail_self_learning_log(self.agent.config, lines)
         return result
 
-    def run_self_learning_cycle(self, auto_repair: bool | None = None) -> dict:
+    def run_self_learning_cycle(self, auto_repair: bool | None = None, repair_cooldown_seconds: float | None = None) -> dict:
         cfg = self.agent.config.self_learning
         repair_enabled = cfg.auto_repair if auto_repair is None else bool(auto_repair)
         started = time.time()
@@ -567,7 +575,8 @@ class SimpleNermanaServer:
                 {"issues": [issue.get("title", "issue") for issue in issues[:8]], "serious": len(serious)},
             )
             repair = None
-            cooldown = max(30.0, float(cfg.repair_cooldown_seconds or 600))
+            cooldown_source = cfg.repair_cooldown_seconds if repair_cooldown_seconds is None else repair_cooldown_seconds
+            cooldown = max(5.0, float(cooldown_source or 600))
             with self.self_learning_lock:
                 last_repair_at = float(self.self_learning_state.get("last_repair_at") or 0)
             if serious and repair_enabled and time.time() - last_repair_at >= cooldown:
@@ -597,6 +606,89 @@ class SimpleNermanaServer:
             self._set_self_learning_state(ok=False, last_cycle_at=time.time(), last_error=str(exc))
             return {"ok": False, "error": str(exc), "log": tail_self_learning_log(self.agent.config)}
 
+    def trigger_self_heal(self, source: str, details: dict | None = None) -> dict:
+        cfg = self.agent.config.self_learning
+        details = details or {}
+        error = _error_summary(details)
+        append_self_learning_log(self.agent.config, "error", f"{source}: {error}", _compact_heal_details(details))
+        if not _repairable_error(error):
+            append_self_learning_log(self.agent.config, "heal", "auto heal not needed for non-repairable error", {"source": source, "error": error})
+            return {"ok": True, "started": False, "reason": "not repairable"}
+        if not cfg.enabled:
+            return {"ok": False, "started": False, "reason": "self learning disabled"}
+        if not cfg.auto_repair:
+            append_self_learning_log(self.agent.config, "heal", "auto heal skipped because auto repair is disabled", {"source": source})
+            return {"ok": False, "started": False, "reason": "auto repair disabled"}
+        if not cfg.heal_on_error:
+            append_self_learning_log(self.agent.config, "heal", "auto heal skipped because heal-on-error is disabled", {"source": source})
+            return {"ok": False, "started": False, "reason": "heal on error disabled"}
+        cooldown = max(5.0, float(cfg.heal_on_error_cooldown_seconds or 30))
+        now = time.time()
+        with self.self_learning_lock:
+            thread_alive = bool(self.self_heal_thread and self.self_heal_thread.is_alive())
+            last_heal_at = float(self.self_learning_state.get("last_heal_at") or 0)
+            if thread_alive:
+                append_self_learning_log(self.agent.config, "heal", "auto heal already running", {"source": source})
+                return {"ok": True, "started": False, "reason": "already running"}
+            if now - last_heal_at < cooldown:
+                append_self_learning_log(
+                    self.agent.config,
+                    "heal",
+                    "auto heal skipped by cooldown",
+                    {"source": source, "cooldown_seconds": cooldown},
+                )
+                return {"ok": True, "started": False, "reason": "cooldown"}
+            self.self_learning_state.update(
+                {
+                    "healing": True,
+                    "last_heal_at": now,
+                    "last_heal_source": source,
+                    "last_heal_error": error,
+                }
+            )
+            self.self_heal_thread = threading.Thread(
+                target=self._run_error_self_heal,
+                args=(source, error),
+                name="nermana-error-self-heal",
+                daemon=True,
+            )
+            self.self_heal_thread.start()
+        append_self_learning_log(self.agent.config, "heal", "auto heal started", {"source": source, "error": error})
+        return {"ok": True, "started": True, "source": source}
+
+    def trigger_self_heal_from_result(self, source: str, result: dict) -> dict | None:
+        if not _result_has_repair_signal(result):
+            return None
+        return self.trigger_self_heal(source, result)
+
+    def _run_error_self_heal(self, source: str, error: str) -> None:
+        try:
+            result = self.run_self_learning_cycle(
+                auto_repair=True,
+                repair_cooldown_seconds=self.agent.config.self_learning.heal_on_error_cooldown_seconds,
+            )
+            append_self_learning_log(
+                self.agent.config,
+                "heal",
+                "auto heal finished",
+                {
+                    "source": source,
+                    "ok": bool(result.get("ok")),
+                    "repaired": bool(result.get("repair")),
+                    "error": result.get("error", ""),
+                },
+            )
+            with self.self_learning_lock:
+                self.self_learning_state["heals"] = int(self.self_learning_state.get("heals", 0) or 0) + 1
+                self.self_learning_state["last_error"] = "" if result.get("ok") else str(result.get("error", error))
+        except Exception as exc:
+            append_self_learning_log(self.agent.config, "heal", f"auto heal failed: {exc}", {"source": source})
+            with self.self_learning_lock:
+                self.self_learning_state["last_error"] = str(exc)
+        finally:
+            with self.self_learning_lock:
+                self.self_learning_state["healing"] = False
+
     def _self_learning_loop(self) -> None:
         interval = max(60.0, float(self.agent.config.self_learning.interval_seconds or 300))
         try:
@@ -615,6 +707,8 @@ class SimpleNermanaServer:
                     result = bot.poll_once(timeout=20)
                     processed = int(result.get("processed", 0) or 0)
                     last_error = "" if result.get("ok") else str(result.get("error") or result.get("errors") or "poll failed")
+                    if last_error:
+                        self.trigger_self_heal("telegram_poll", result)
                     with self.telegram_lock:
                         self.telegram_state["ok"] = bool(result.get("ok"))
                         self.telegram_state["running"] = True
@@ -623,6 +717,7 @@ class SimpleNermanaServer:
                         self.telegram_state["processed"] = int(self.telegram_state.get("processed", 0)) + processed
                         self.telegram_state["offset"] = int(result.get("offset", bot.offset) or 0)
                 except Exception as exc:
+                    self.trigger_self_heal("telegram_poll_exception", {"ok": False, "error": str(exc)})
                     self._set_telegram_state(ok=False, running=True, last_poll_at=time.time(), last_error=str(exc), offset=bot.offset)
                 self.telegram_stop.wait(interval)
         finally:
@@ -733,7 +828,11 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": body_error}, HTTPStatus.BAD_REQUEST)
             return
         if path == "/api/chat":
-            self._json(self.agent.chat(str(body.get("message", "")), str(body.get("session_id", "web"))))
+            result = self.agent.chat(str(body.get("message", "")), str(body.get("session_id", "web")))
+            heal = self.server_state.trigger_self_heal_from_result("web_chat", result)
+            if heal:
+                result["self_heal"] = heal
+            self._json(result)
         elif path == "/api/settings":
             cleaned = self._preserve_redacted_secrets(body)
             new_config = merge_config(self.agent.config, cleaned)
@@ -759,13 +858,21 @@ class NermanaHandler(BaseHTTPRequestHandler):
             result = self.agent.models.delete_model(str(body.get("model_name", "")), force=bool(body.get("force", False)))
             self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST)
         elif path == "/api/models/restart":
-            self._json(self.agent.models.restart_server())
+            result = self.agent.models.restart_server()
+            heal = self.server_state.trigger_self_heal_from_result("model_restart", result)
+            if heal:
+                result["self_heal"] = heal
+            self._json(result)
         elif path == "/api/models/stop":
             self.agent.models.stop_server()
             killed = self.agent.models.stop_external_server()
             self._json({"ok": True, "message": "Model server stop requested.", "killed_external": killed, "health": self.agent.models.server_health()})
         elif path == "/api/models/test":
-            self._json(self.agent.models.chat([{"role": "user", "content": str(body.get("message", ""))}], max_tokens=128))
+            result = self.agent.models.chat([{"role": "user", "content": str(body.get("message", ""))}], max_tokens=128)
+            heal = self.server_state.trigger_self_heal_from_result("model_test", result)
+            if heal:
+                result["self_heal"] = heal
+            self._json(result)
         elif path == "/api/models/llama/use-detected":
             resolved = self.agent.models.resolve_llama_server()
             if not resolved:
@@ -820,7 +927,11 @@ class NermanaHandler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self._json({"ok": False, "error": "tool payload must be a JSON object"}, HTTPStatus.BAD_REQUEST)
                 return
-            self._json(self.agent.run_tool(tool_name, payload))
+            result = self.agent.run_tool(tool_name, payload)
+            heal = self.server_state.trigger_self_heal_from_result(f"tool:{tool_name}", result)
+            if heal:
+                result["self_heal"] = heal
+            self._json(result)
         elif path == "/api/memory":
             memory_id = self.agent.memory.remember(str(body.get("content", "")), tags=str(body.get("tags", "")), source=str(body.get("source", "web")))
             self._json({"ok": True, "memory_id": memory_id})
@@ -834,9 +945,15 @@ class NermanaHandler(BaseHTTPRequestHandler):
             self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.NOT_FOUND)
         elif path == "/api/telegram/poll_once":
             try:
-                self._json(TelegramBot(self.agent).poll_once(timeout=1))
+                result = TelegramBot(self.agent, error_callback=self.server_state.trigger_self_heal).poll_once(timeout=1)
+                heal = self.server_state.trigger_self_heal_from_result("telegram_poll_once", result)
+                if heal:
+                    result["self_heal"] = heal
+                self._json(result)
             except Exception as exc:
-                self._json({"ok": False, "error": str(exc)})
+                result = {"ok": False, "error": str(exc)}
+                result["self_heal"] = self.server_state.trigger_self_heal("telegram_poll_once_exception", result)
+                self._json(result)
         elif path == "/api/telegram/start":
             self._json(self.server_state.start_telegram())
         elif path == "/api/telegram/clear_webhook":
@@ -1026,6 +1143,105 @@ def _model_loading_error(message: str) -> bool:
 def _repair_step_skippable(step: dict) -> bool:
     result = step.get("result") or {}
     return bool(result.get("skipped"))
+
+
+def _result_has_repair_signal(result: dict) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("ok") is False and _repairable_error(result.get("error", "")):
+        return True
+    for key in ["model_error", "original_model_error", "error"]:
+        if _repairable_error(result.get(key, "")):
+            return True
+    for tool_result in result.get("tool_results", []) or []:
+        if isinstance(tool_result, dict) and tool_result.get("ok") is False and _repairable_error(tool_result.get("error", "")):
+            return True
+    errors = result.get("errors")
+    if isinstance(errors, list) and any(_repairable_error(item) for item in errors):
+        return True
+    return False
+
+
+def _repairable_error(error: object) -> bool:
+    text = str(error or "").lower()
+    if not text:
+        return False
+    ignored = [
+        "message is required",
+        "invalid json",
+        "json body",
+        "file not found",
+        "folder not found",
+        "location not found",
+        "prompt is required",
+        "tool payload",
+        "unknown tool",
+        "not in allowed_termux_commands",
+        "metacharacters",
+        "disabled or missing token",
+        "token is missing",
+    ]
+    if any(item in text for item in ignored):
+        return False
+    signals = [
+        "connection refused",
+        "failed to establish",
+        "timed out",
+        "timeout",
+        "loading model",
+        "service unavailable",
+        "http error 400",
+        "bad request",
+        "context",
+        "llama",
+        "model",
+        "telegram",
+        "webhook",
+        "poll",
+        "bot not found",
+        "unauthorized",
+        "unavailable",
+        "offline",
+        "not reachable",
+        "not responding",
+    ]
+    return any(signal in text for signal in signals)
+
+
+def _error_summary(details: dict | None) -> str:
+    if not isinstance(details, dict):
+        return str(details or "unknown error")
+    for key in ["error", "model_error", "original_model_error", "message"]:
+        value = details.get(key)
+        if value:
+            return str(value)
+    errors = details.get("errors")
+    if errors:
+        return str(errors)
+    for tool_result in details.get("tool_results", []) or []:
+        if isinstance(tool_result, dict) and tool_result.get("ok") is False:
+            return str(tool_result.get("error") or "tool failed")
+    return "error detected"
+
+
+def _compact_heal_details(details: dict | None) -> dict:
+    if not isinstance(details, dict):
+        return {"detail": str(details or "")}
+    compact = {
+        "ok": details.get("ok"),
+        "error": _error_summary(details),
+    }
+    if details.get("tool"):
+        compact["tool"] = details.get("tool")
+    if details.get("model"):
+        compact["model"] = details.get("model")
+    if details.get("tool_results"):
+        compact["tools"] = [
+            {"tool": item.get("tool"), "ok": item.get("ok"), "error": item.get("error", "")}
+            for item in details.get("tool_results", [])[:4]
+            if isinstance(item, dict)
+        ]
+    return compact
 
 
 def _unique_upload_path(folder: Path, filename: str) -> Path:

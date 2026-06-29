@@ -136,8 +136,10 @@ class MemoryConfig:
 class SelfLearningConfig:
     enabled: bool = True
     auto_repair: bool = True
+    heal_on_error: bool = True
     interval_seconds: float = 300.0
     repair_cooldown_seconds: float = 600.0
+    heal_on_error_cooldown_seconds: float = 30.0
     log_path: str = "data/logs/self-learning.log"
     tail_lines: int = 50
 

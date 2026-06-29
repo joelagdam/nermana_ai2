@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-CORE_KNOWLEDGE_VERSION = "2026-06-28.2"
+CORE_KNOWLEDGE_VERSION = "2026-06-29.1"
 
 
 @dataclass(frozen=True)
@@ -84,7 +84,8 @@ CORE_KNOWLEDGE: tuple[KnowledgeCard, ...] = (
         content=(
             "The self-learning loop is an always-on operational monitor, not real consciousness. "
             "It runs Doctor diagnostics, writes the latest events to data/logs/self-learning.log, and can run safe Auto Repair when warn/error issues appear. "
-            "The web Self Learning page shows worker state and the latest 50 log lines."
+            "When heal-on-error is enabled, chat, tool, model, and Telegram errors immediately log a self-heal event and start a safe Doctor repair worker if cooldown allows it. "
+            "The web Self Learning page shows worker state, healing state, repair counts, last heal source, and the latest 50 log lines."
         ),
     ),
     KnowledgeCard(

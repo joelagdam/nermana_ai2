@@ -1467,7 +1467,7 @@ async function renderSelfLearning() {
 function renderSelfLearningView(data) {
   const worker = data.worker || {};
   const log = data.log || {};
-  document.getElementById("learningWorkerState").textContent = worker.running ? "Running" : worker.last_error || "Stopped";
+  document.getElementById("learningWorkerState").textContent = worker.healing ? "Healing" : worker.running ? "Running" : worker.last_error || "Stopped";
   document.getElementById("learningCycleCount").textContent = String(worker.cycles || 0);
   document.getElementById("learningSummary").textContent = worker.last_summary || (data.enabled ? "Ready to diagnose and repair safe issues." : "Self learning is disabled.");
   document.getElementById("learningLogPath").textContent = log.path || "log";
@@ -1476,8 +1476,12 @@ function renderSelfLearningView(data) {
   status.appendChild(activityItem("Enabled", data.enabled ? "Yes" : "No"));
   status.appendChild(activityItem("Worker", worker.running ? "Running" : worker.thread_alive ? "Alive" : "Stopped"));
   status.appendChild(activityItem("Auto repair", data.auto_repair ? "Enabled" : "Disabled"));
+  status.appendChild(activityItem("Heal on error", worker.healing ? "Healing now" : `${worker.heals || 0} heal(s)`));
   status.appendChild(activityItem("Last cycle", formatTime(worker.last_cycle_at)));
   status.appendChild(activityItem("Last repair", formatTime(worker.last_repair_at)));
+  status.appendChild(activityItem("Last heal", formatTime(worker.last_heal_at)));
+  if (worker.last_heal_source) status.appendChild(activityItem("Last heal source", worker.last_heal_source));
+  if (worker.last_heal_error) status.appendChild(activityItem("Last heal error", worker.last_heal_error));
   if (worker.last_error) status.appendChild(activityItem("Last error", worker.last_error));
   const tail = document.getElementById("learningLog");
   tail.innerHTML = "";

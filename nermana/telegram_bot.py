@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import threading
-from typing import Any
+from typing import Any, Callable
 
 from .agent import AgentCore
 from .config import resolve_path
@@ -10,8 +10,9 @@ from .http_client import get_json, post_json
 
 
 class TelegramBot:
-    def __init__(self, agent: AgentCore):
+    def __init__(self, agent: AgentCore, error_callback: Callable[[str, dict[str, Any]], Any] | None = None):
         self.agent = agent
+        self.error_callback = error_callback
         self.config = agent.config.telegram
         self.base_url = f"https://api.telegram.org/bot{self.config.token}"
         self.offset_path = resolve_path(self.config.offset_path)
@@ -158,6 +159,7 @@ class TelegramBot:
                 chat_result = {"ok": False, "error": str(exc)}
             finally:
                 stop_typing.set()
+            self._notify_result_error("telegram_chat", chat_result)
             for reply in self._reply_batches(chat_result):
                 sent = self._send(chat_id, reply)
                 if not sent.get("ok"):
@@ -182,9 +184,11 @@ class TelegramBot:
                 chat_result = self.agent.chat(text, session_id=session_id)
             except Exception as exc:
                 chat_result = {"ok": False, "error": str(exc)}
+            self._notify_result_error("telegram_chat", chat_result)
             for reply in self._reply_batches(chat_result):
                 sent = self._send(chat_id, reply)
                 if not sent.get("ok"):
+                    self._notify_result_error("telegram_send", sent)
                     print(f"telegram: {sent.get('error', 'send failed')}")
                     break
         finally:
@@ -211,6 +215,14 @@ class TelegramBot:
                 return
             for thread in threads:
                 thread.join(max(0.01, min(0.1, deadline - time.time())))
+
+    def _notify_result_error(self, source: str, result: dict[str, Any]) -> None:
+        if not self.error_callback or not _telegram_result_has_error(result):
+            return
+        try:
+            self.error_callback(source, result)
+        except Exception:
+            pass
 
     def reset_offset(self, drop_pending_updates: bool = False) -> dict[str, Any]:
         self.offset = 0
@@ -453,3 +465,16 @@ def _telegram_chunks(text: str, limit: int = 3900) -> list[str]:
         chunks.append(current[:cut].strip())
         current = current[cut:].strip()
     return chunks
+
+
+def _telegram_result_has_error(result: dict[str, Any]) -> bool:
+    if not isinstance(result, dict):
+        return True
+    if result.get("ok") is False:
+        return True
+    if result.get("model_error") or result.get("original_model_error"):
+        return True
+    for item in result.get("tool_results", []) or []:
+        if isinstance(item, dict) and item.get("ok") is False:
+            return True
+    return False
