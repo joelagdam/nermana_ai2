@@ -1476,7 +1476,7 @@ function renderSelfLearningView(data) {
   status.appendChild(activityItem("Enabled", data.enabled ? "Yes" : "No"));
   status.appendChild(activityItem("Worker", worker.running ? "Running" : worker.thread_alive ? "Alive" : "Stopped"));
   status.appendChild(activityItem("Auto repair", data.auto_repair ? "Enabled" : "Disabled"));
-  status.appendChild(activityItem("Heal on error", worker.healing ? "Healing now" : `${worker.heals || 0} heal(s)`));
+  status.appendChild(activityItem("Heal on error", data.heal_on_error ? (worker.healing ? "Healing now" : `${worker.heals || 0} heal(s)`) : "Disabled"));
   status.appendChild(activityItem("Last cycle", formatTime(worker.last_cycle_at)));
   status.appendChild(activityItem("Last repair", formatTime(worker.last_repair_at)));
   status.appendChild(activityItem("Last heal", formatTime(worker.last_heal_at)));

@@ -554,7 +554,13 @@ class SimpleNermanaServer:
             state["running"] = False
             state["ok"] = False
             state["last_error"] = state.get("last_error") or "Self learning worker stopped."
-        result = {"ok": True, "enabled": self.agent.config.self_learning.enabled, "auto_repair": self.agent.config.self_learning.auto_repair, "worker": state}
+        result = {
+            "ok": True,
+            "enabled": self.agent.config.self_learning.enabled,
+            "auto_repair": self.agent.config.self_learning.auto_repair,
+            "heal_on_error": self.agent.config.self_learning.heal_on_error,
+            "worker": state,
+        }
         if include_log:
             result["log"] = tail_self_learning_log(self.agent.config, lines)
         return result
