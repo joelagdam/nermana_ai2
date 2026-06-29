@@ -155,7 +155,8 @@ class AgentCore:
         return second
 
     def _try_model_chat(self, messages: list[dict[str, str]], available_context: int | None = None) -> dict[str, Any]:
-        return self.models.chat(messages, max_tokens=self._max_response_tokens(available_context, messages))
+        context = available_context or self._effective_context_size()
+        return self.models.chat(messages, max_tokens=self._max_response_tokens(context, messages))
 
     def _retry_compact_if_needed(self, messages: list[dict[str, str]], result: dict[str, Any]) -> dict[str, Any] | None:
         error = str(result.get("error", ""))
@@ -192,8 +193,16 @@ class AgentCore:
         return result
 
     def _build_messages(self, session_id: str, message: str, memories: list, tool_context: str, force_fresh: bool = False) -> list[dict[str, str]]:
-        if int(self.config.model.context_size or 0) <= 1024:
+        effective_context = self._effective_context_size()
+        if effective_context <= 1024:
             return self._build_compact_messages(message, tool_context)
+        tight_context = effective_context <= 2048
+        memory_limit = 220 if tight_context else 320
+        consolidation_limit = 220 if tight_context else 320
+        tool_limit = 1500 if tight_context else 3200
+        knowledge_limit = 700 if tight_context else 1200
+        history_limit = 240 if tight_context else 420
+        history_count = 2 if tight_context else 4
         thinking = self._thinking_hint(message)
         system = (
             "You are Nermana, an offline-first cyberperson running on the user's phone in Termux. "
@@ -213,20 +222,20 @@ class AgentCore:
         )
         context_parts = []
         if memories:
-            context_parts.append(self._format_memory_context(memories))
+            context_parts.append(self._format_memory_context(memories, text_limit=memory_limit))
         consolidations = self._relevant_consolidations(message, limit=3)
         if consolidations:
-            context_parts.append("Compressed memory insights:\n" + "\n".join(f"- {self._compact_text(item['insight'], 320)}" for item in consolidations))
+            context_parts.append("Compressed memory insights:\n" + "\n".join(f"- {self._compact_text(item['insight'], consolidation_limit)}" for item in consolidations))
         if tool_context:
-            context_parts.append("Tool context:\n" + self._compact_text(tool_context, 3200))
+            context_parts.append("Tool context:\n" + self._compact_text(tool_context, tool_limit))
         built_in_knowledge = core_knowledge_context(message, limit=2)
         if built_in_knowledge:
-            context_parts.append(self._compact_text(built_in_knowledge, 1200))
+            context_parts.append(self._compact_text(built_in_knowledge, knowledge_limit))
         history = self._prompt_history(session_id, message, force_fresh=force_fresh)
         messages = [{"role": "system", "content": system}]
         if context_parts:
             messages.append({"role": "system", "content": "\n\n".join(context_parts)})
-        messages.extend({"role": item["role"], "content": self._compact_text(item["content"], 420)} for item in history)
+        messages.extend({"role": item["role"], "content": self._compact_text(item["content"], history_limit)} for item in history[-history_count:])
         messages.append({"role": "user", "content": f"{message} {thinking}".strip()})
         return messages
 
@@ -1053,12 +1062,12 @@ class AgentCore:
 
         return sorted(hits, key=score, reverse=True)[:limit]
 
-    def _format_memory_context(self, memories: list) -> str:
+    def _format_memory_context(self, memories: list, text_limit: int = 260) -> str:
         lines = []
         for hit in memories:
             text = hit.summary or hit.content
             label = f"[Memory {hit.id} | importance {float(hit.importance or 0):.2f}]"
-            lines.append(f"- {label} {self._compact_text(text, 260)}")
+            lines.append(f"- {label} {self._compact_text(text, text_limit)}")
         return "Compressed relevant memory:\n" + "\n".join(lines)
 
     def _relevant_consolidations(self, query: str, limit: int = 3) -> list[dict[str, Any]]:
@@ -1094,6 +1103,12 @@ class AgentCore:
             return int(match.group(1))
         except ValueError:
             return None
+
+    def _effective_context_size(self) -> int:
+        try:
+            return int(self.models.effective_context_size())
+        except Exception:
+            return int(self.config.model.context_size or 2048)
 
     def _max_response_tokens(self, available_context: int | None = None, messages: list[dict[str, str]] | None = None) -> int:
         context = int(available_context or self.config.model.context_size or 2048)

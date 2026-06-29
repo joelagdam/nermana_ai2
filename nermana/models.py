@@ -201,6 +201,22 @@ class ModelManager:
         self._cache_runtime(health)
         return health
 
+    def cached_server_context_size(self, max_age_seconds: float = 60.0) -> int | None:
+        if not self._runtime_cache or time.time() - self._runtime_cache_at > max_age_seconds:
+            return None
+        try:
+            value = int(self._runtime_cache.get("server_context_size") or 0)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    def effective_context_size(self, max_age_seconds: float = 60.0) -> int:
+        configured = int(self.config.model.context_size or 2048)
+        live = self.cached_server_context_size(max_age_seconds=max_age_seconds)
+        if live:
+            return max(256, min(configured, live))
+        return configured
+
     def _cache_runtime(self, health: dict[str, Any]) -> None:
         self._runtime_cache = dict(health)
         self._runtime_cache_at = time.time()
@@ -222,7 +238,8 @@ class ModelManager:
         if configured > available:
             health["context_warning"] = (
                 f"llama.cpp is serving {available} tokens, but Nermana is configured for {configured}. "
-                "Restart llama.cpp from Models or termux_start_all.sh so the saved context is applied."
+                "Nermana will budget against the smaller live context. Restart llama.cpp from Models or "
+                "termux_start_all.sh after changing context or parallel slots if you want a larger live window."
             )
 
     def _server_context_from_models(self, models_data: Any) -> int | None:
@@ -292,6 +309,7 @@ class ModelManager:
                     response = retry
                     selected_model = alternate_model
                 else:
+                    self._cache_context_error(retry.error or response.error)
                     return {
                         "ok": False,
                         "error": f"{response.error}; retry with server model `{alternate_model}` failed: {retry.error}",
@@ -299,12 +317,35 @@ class ModelManager:
                         "retry_model": alternate_model,
                     }
         if not response.ok:
+            self._cache_context_error(response.error)
             return {"ok": False, "error": response.error, "model": selected_model}
         try:
             content = response.data["choices"][0]["message"]["content"]
         except Exception:
             return {"ok": False, "error": "Model response did not match OpenAI chat format.", "raw": response.data}
         return {"ok": True, "content": content, "raw": response.data, "model": selected_model}
+
+    def _cache_context_error(self, error: str) -> None:
+        available = self._available_context_from_error(error)
+        if not available:
+            return
+        health = {
+            "ok": False,
+            "endpoint_ok": True,
+            "ready": False,
+            "base_url": self.config.model.base_url,
+            "error": error,
+            "state": "context mismatch",
+            "server_context_size": available,
+            "configured_context_size": int(self.config.model.context_size or 0),
+            "context_mismatch": int(self.config.model.context_size or 0) > available,
+        }
+        if health["context_mismatch"]:
+            health["context_warning"] = (
+                f"llama.cpp is serving {available} tokens, but Nermana is configured for {self.config.model.context_size}. "
+                "Nermana will compact prompts until the model server is restarted with matching settings."
+            )
+        self._cache_runtime(health)
 
     def restart_server(self) -> dict[str, Any]:
         self.invalidate_runtime_cache()

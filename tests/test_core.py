@@ -269,6 +269,22 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(result["configured_context_size"], 4096)
         self.assertIn("Restart llama.cpp", result["context_warning"])
 
+    def test_effective_context_uses_cached_live_context(self) -> None:
+        cfg = AppConfig(model=ModelConfig(active_model="active.gguf", context_size=4096))
+        manager = ModelManager(cfg, persist=False)
+        manager._cache_runtime({"server_context_size": 2048})
+        self.assertEqual(manager.effective_context_size(), 2048)
+
+    def test_chat_context_error_updates_effective_context_cache(self) -> None:
+        cfg = AppConfig(model=ModelConfig(active_model="active.gguf", context_size=4096))
+        manager = ModelManager(cfg, persist=False)
+        error = "HTTP Error 400: Bad Request: request (1092 tokens) exceeds the available context size (512 tokens), try increasing it"
+        bad = HttpResponse(False, 400, None, error)
+        with patch("nermana.models.post_json", return_value=bad):
+            result = manager.chat([{"role": "user", "content": "hello"}])
+        self.assertFalse(result["ok"])
+        self.assertEqual(manager.effective_context_size(), 512)
+
     def test_server_log_tail_reads_recent_llama_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig()
@@ -842,6 +858,16 @@ class AgentTests(unittest.TestCase):
             long_messages = [{"role": "user", "content": "Give a detailed step by step plan."}]
             self.assertEqual(agent._max_response_tokens(messages=short_messages), 128)
             self.assertEqual(agent._max_response_tokens(messages=long_messages), 512)
+
+    def test_agent_budgets_against_cached_live_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")), model=ModelConfig(context_size=4096))
+            agent = AgentCore(cfg)
+            agent.models._cache_runtime({"server_context_size": 1024})
+            with patch.object(agent.models, "chat", return_value={"ok": True, "content": "ok"}) as chat:
+                result = agent.chat("Give a detailed step by step plan.", session_id="live-context")
+            self.assertEqual(result["reply"], "ok")
+            self.assertEqual(chat.call_args.kwargs["max_tokens"], 160)
 
     def test_agent_polishes_generic_assistant_closers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
