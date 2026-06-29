@@ -1186,6 +1186,17 @@ def _repairable_error(error: object) -> bool:
         "metacharacters",
         "disabled or missing token",
         "token is missing",
+        "telegram getupdates is offline",
+        "internet or telegram is unreachable",
+        "telegram is offline",
+        "telegram network is unreachable",
+        "telegram sendmessage is offline",
+        "bot not found",
+        "token unauthorized",
+        "unauthorized",
+        "temporary failure",
+        "no route",
+        "name or service",
     ]
     if any(item in text for item in ignored):
         return False

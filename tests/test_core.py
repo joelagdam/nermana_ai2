@@ -1749,6 +1749,27 @@ class DashboardTests(unittest.TestCase):
             cycle.assert_not_called()
             self.assertIsNone(server.trigger_self_heal_from_result("weather", {"ok": False, "error": "location not found: Tagum City"}))
 
+    def test_error_trigger_logs_but_does_not_repair_telegram_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig(
+                memory=MemoryConfig(db_path=str(Path(tmp) / "m.sqlite3")),
+                self_learning=SelfLearningConfig(
+                    enabled=True,
+                    auto_repair=True,
+                    heal_on_error=True,
+                    log_path=str(Path(tmp) / "self-learning.log"),
+                ),
+            )
+            server = SimpleNermanaServer(AgentCore(cfg))
+            result = server.trigger_self_heal(
+                "telegram_poll",
+                {"ok": False, "error": "Telegram getUpdates is offline. Internet or Telegram is unreachable; local Nermana stays running."},
+            )
+            self.assertFalse(result["started"])
+            self.assertEqual(result["reason"], "not repairable")
+            self.assertFalse(server.self_heal_thread)
+            self.assertTrue(any("auto heal not needed" in line for line in server.self_learning_status()["log"]["lines"]))
+
     def test_telegram_chat_error_callback_triggers_for_model_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig(
